@@ -28,7 +28,7 @@ SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule_today.json")
 
 # B站 API
 BILI_NAV_URL = "https://api.bilibili.com/x/web-interface/nav"
-BILI_REPLY_URL = "https://api.bilibili.com/x/v2/reply/reply"
+BILI_REPLY_URL = "https://api.bilibili.com/x/v2/reply/add"
 BILI_NOTIFY_URL = "https://api.bilibili.com/x/msgfeed/reply"
 BILI_COOKIE_INFO_URL = "https://passport.bilibili.com/x/passport-login/web/cookie/info"
 BILI_COOKIE_REFRESH_URL = "https://passport.bilibili.com/x/passport-login/web/cookie/refresh"
@@ -75,6 +75,7 @@ class BiliBiliBot(Star):
         self._task: asyncio.Task | None = None
         self._last_cookie_check = 0
         self._login_qrcode_key = None  # 扫码登录用
+        self._first_poll = not os.path.exists(REPLIED_FILE)  # 首次运行标记
 
         # 自动启动后台任务
         if self._has_cookie():
@@ -653,13 +654,12 @@ class BiliBiliBot(Star):
                 logger.error(f"[BiliBot] Cookie 刷新失败: {msg}")
 
     async def _poll_and_reply(self):
-        """轮询B站通知并回复评论（骨架）"""
+        """轮询B站通知并回复评论"""
         try:
-            # 获取未读评论通知
             resp = requests.get(
                 BILI_NOTIFY_URL,
                 headers=self._headers(),
-                params={"id": 0, "type": 1},
+                params={"ps": 10, "pn": 1},
                 timeout=10,
             )
             data = resp.json()
@@ -672,6 +672,18 @@ class BiliBiliBot(Star):
                 return
 
             replied = set(self._load_json(REPLIED_FILE, []))
+
+            # 首次运行：标记所有现有评论为已读，不回复
+            if self._first_poll:
+                for item in items:
+                    rpid = str(item.get("item", {}).get("source_id", ""))
+                    if rpid:
+                        replied.add(rpid)
+                self._save_json(REPLIED_FILE, list(replied))
+                self._first_poll = False
+                logger.info(f"[BiliBot] 首次运行，标记 {len(items)} 条旧评论为已读")
+                return
+
             count = 0
             max_replies = self.config.get("MAX_REPLIES_PER_RUN", 3)
 
@@ -679,24 +691,22 @@ class BiliBiliBot(Star):
                 if count >= max_replies:
                     break
 
-                rpid = str(item.get("id", ""))
+                r = item.get("item", {})
+                rpid = str(r.get("source_id", ""))
                 if rpid in replied:
                     continue
 
-                # 提取评论信息
-                user = item.get("user", {})
-                mid = str(user.get("mid", ""))
-                username = user.get("nickname", "")
-                content = item.get("item", {}).get("source_content", "")
-                oid = item.get("item", {}).get("subject_id", 0)
-                comment_type = item.get("item", {}).get("business_id", 1)
+                mid = str(item.get("user", {}).get("mid", ""))
+                username = item.get("user", {}).get("nickname", "")
+                content = r.get("source_content", "")
+                oid = r.get("subject_id", 0)
+                comment_type = r.get("business_id", 1)
 
                 if not content or not rpid:
                     continue
 
                 logger.info(f"[BiliBot] 新评论: {username}({mid}): {content}")
 
-                # 生成AI回复
                 ai_reply = await self._generate_reply(content, mid, username)
 
                 if ai_reply:
@@ -709,10 +719,9 @@ class BiliBiliBot(Star):
                 else:
                     logger.warning(f"[BiliBot] 生成回复失败，跳过: {username}")
 
+                # 不管成功失败都标记，防止重复处理
                 replied.add(rpid)
-                count += 1
 
-            # 保存已回复列表
             self._save_json(REPLIED_FILE, list(replied))
 
         except Exception as e:
@@ -841,10 +850,17 @@ class BiliBiliBot(Star):
                 },
                 timeout=10,
             )
+            logger.debug(f"[BiliBot] 回复API响应: status={resp.status_code}, body={resp.text[:200]}")
             data = resp.json()
             if data["code"] == 0:
                 logger.info(f"[BiliBot] 回复成功: {content[:30]}...")
                 return True
+            elif data["code"] == -101:
+                logger.error("[BiliBot] SESSDATA 失效！请重新登录")
+                return False
+            elif data["code"] == -111:
+                logger.error("[BiliBot] bili_jct 错误！请检查 Cookie")
+                return False
             else:
                 logger.warning(f"[BiliBot] 回复失败: {data.get('message', data['code'])}")
                 return False
