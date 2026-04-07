@@ -740,22 +740,15 @@ class BiliBiliBot(Star):
         )
 
     async def _generate_reply(self, content: str, mid: str, username: str) -> str | None:
-        """调用 AstrBot 的 LLM provider 生成回复"""
+        """生成回复：支持自定义API或AstrBot provider"""
         try:
-            provider = self.context.get_using_provider()
-            if not provider:
-                logger.error("[BiliBot] 没有可用的 LLM provider")
-                return None
-
             system_prompt = self._get_system_prompt()
-
-            # 构建提示
             owner_name = self.config.get("OWNER_NAME", "") or "主人"
             is_owner = str(mid) == str(self.config.get("OWNER_MID", ""))
 
             prompt = (
                 f"B站用户「{username}」"
-                f"{'（这是{owner_name}）' if is_owner else ''}"
+                f"{'（这是' + owner_name + '）' if is_owner else ''}"
                 f"在你的视频下评论了：\n"
                 f"「{content}」\n\n"
                 f"请回复这条评论。要求：简短自然（50字以内），像真人而不是AI，"
@@ -764,31 +757,68 @@ class BiliBiliBot(Star):
 
             max_tokens = self.config.get("REPLY_MAX_TOKENS", 300)
 
-            resp = await provider.text_chat(
-                prompt=prompt,
-                session_id=f"bili_reply_{mid}",
-                contexts=[],
-                system_prompt=system_prompt,
-            )
-
-            if resp:
-                # 兼容不同版本的 AstrBot 响应格式
-                reply_text = None
-                if hasattr(resp, 'completion_text') and resp.completion_text:
-                    reply_text = resp.completion_text
-                elif hasattr(resp, 'result_chain') and resp.result_chain:
-                    # 从 MessageChain 提取文本
-                    for comp in resp.result_chain.chain:
-                        if hasattr(comp, 'text') and comp.text:
-                            reply_text = comp.text
-                            break
-
-                if reply_text:
-                    reply = reply_text.strip().strip('"').strip("'")
-                    return reply if reply else None
+            if self.config.get("USE_CUSTOM_API", False):
+                return await self._call_custom_api(system_prompt, prompt, max_tokens)
+            else:
+                return await self._call_astrbot_provider(system_prompt, prompt)
 
         except Exception as e:
             logger.error(f"[BiliBot] LLM 回复生成失败: {e}\n{traceback.format_exc()}")
+        return None
+
+    async def _call_custom_api(self, system_prompt: str, prompt: str, max_tokens: int) -> str | None:
+        """通过自定义 OpenAI 兼容 API 生成回复"""
+        from openai import AsyncOpenAI
+
+        base_url = self.config.get("API_BASE_URL", "")
+        api_key = self.config.get("API_KEY", "")
+        model = self.config.get("API_MODEL", "")
+
+        if not all([base_url, api_key, model]):
+            logger.error("[BiliBot] 自定义API配置不完整，请填写 API_BASE_URL、API_KEY、API_MODEL")
+            return None
+
+        client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        resp = await client.chat.completions.create(
+            model=model,
+            max_tokens=max_tokens,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+        )
+
+        if resp.choices and resp.choices[0].message.content:
+            reply = resp.choices[0].message.content.strip().strip('"').strip("'")
+            return reply if reply else None
+        return None
+
+    async def _call_astrbot_provider(self, system_prompt: str, prompt: str) -> str | None:
+        """通过 AstrBot 内置 LLM provider 生成回复"""
+        provider = self.context.get_using_provider()
+        if not provider:
+            logger.error("[BiliBot] 没有可用的 LLM provider")
+            return None
+
+        resp = await provider.text_chat(
+            prompt=prompt,
+            session_id=f"bili_reply",
+            contexts=[],
+            system_prompt=system_prompt,
+        )
+
+        if resp:
+            reply_text = None
+            if hasattr(resp, 'completion_text') and resp.completion_text:
+                reply_text = resp.completion_text
+            elif hasattr(resp, 'result_chain') and resp.result_chain:
+                for comp in resp.result_chain.chain:
+                    if hasattr(comp, 'text') and comp.text:
+                        reply_text = comp.text
+                        break
+            if reply_text:
+                reply = reply_text.strip().strip('"').strip("'")
+                return reply if reply else None
         return None
 
     # ================================================================

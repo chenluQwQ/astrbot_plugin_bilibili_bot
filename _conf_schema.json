@@ -155,5 +155,28 @@
     "description": "回复最大token数",
     "type": "int",
     "default": 300
+  },
+
+  "USE_CUSTOM_API": {
+    "description": "使用自定义API（关闭则用AstrBot配置的模型）",
+    "type": "bool",
+    "default": false
+  },
+  "API_BASE_URL": {
+    "description": "自定义API地址（OpenAI兼容格式）",
+    "type": "string",
+    "default": "",
+    "hint": "如 https://api.openai.com/v1 或 https://openrouter.ai/api/v1"
+  },
+  "API_KEY": {
+    "description": "自定义API密钥",
+    "type": "string",
+    "default": ""
+  },
+  "API_MODEL": {
+    "description": "自定义模型名称",
+    "type": "string",
+    "default": "",
+    "hint": "如 anthropic/claude-sonnet-4-5、gpt-4o 等"
   }
 }
