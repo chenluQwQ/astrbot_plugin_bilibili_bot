@@ -1,37 +1,37 @@
 {
   "SESSDATA": {
     "description": "B站 Cookie SESSDATA（登录后获取）",
-    "type": "str",
+    "type": "string",
     "default": "",
     "hint": "浏览器登录B站后，从Cookie中复制"
   },
   "BILI_JCT": {
     "description": "B站 Cookie bili_jct（CSRF Token）",
-    "type": "str",
+    "type": "string",
     "default": "",
     "hint": "浏览器登录B站后，从Cookie中复制"
   },
   "DEDE_USER_ID": {
     "description": "Bot的B站UID（DedeUserID）",
-    "type": "str",
+    "type": "string",
     "default": "",
     "hint": "浏览器登录B站后，从Cookie中复制"
   },
   "REFRESH_TOKEN": {
     "description": "B站 refresh_token（用于Cookie自动刷新）",
-    "type": "str",
+    "type": "string",
     "default": "",
     "hint": "登录时从 localStorage 的 ac_time_value 获取"
   },
   "OWNER_MID": {
     "description": "主人的B站UID（好感度特殊处理）",
-    "type": "str",
+    "type": "string",
     "default": "",
     "hint": "主人的B站数字UID"
   },
   "OWNER_NAME": {
     "description": "主人名称（用于提示词引用）",
-    "type": "str",
+    "type": "string",
     "default": ""
   },
 
@@ -125,7 +125,7 @@
   },
   "PROACTIVE_FOLLOW_UIDS": {
     "description": "特别关注的UP主UID列表（逗号分隔）",
-    "type": "str",
+    "type": "string",
     "default": "",
     "hint": "多个UID用英文逗号隔开，如：12345,67890"
   },
