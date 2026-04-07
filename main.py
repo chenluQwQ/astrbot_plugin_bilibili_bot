@@ -389,8 +389,22 @@ class BiliBiliBot(Star):
     # ===== LLM =====
     async def _llm_call(self, prompt, system_prompt="", max_tokens=300):
         try:
-            if self.config.get("USE_CUSTOM_API",False): return await self._call_custom_api(system_prompt or "你是一个AI助手。", prompt, max_tokens)
-            else: return await self._call_astrbot_provider(system_prompt or "你是一个AI助手。", prompt)
+            pid = self.config.get("LLM_PROVIDER_ID","")
+            if not pid:
+                # 没选provider，用默认
+                provider = self.context.get_using_provider()
+                if not provider: logger.error("[BiliBot] 没有可用的 LLM provider"); return None
+                resp = await provider.text_chat(prompt=prompt, session_id="bili_reply", contexts=[], system_prompt=system_prompt or "你是一个AI助手。")
+                if resp:
+                    if hasattr(resp,'completion_text') and resp.completion_text: return resp.completion_text.strip()
+                    elif hasattr(resp,'result_chain') and resp.result_chain:
+                        for comp in resp.result_chain.chain:
+                            if hasattr(comp,'text') and comp.text: return comp.text.strip()
+                return None
+            else:
+                full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
+                resp = await self.context.llm_generate(chat_provider_id=pid, prompt=full_prompt)
+                return resp.completion_text.strip() if resp and resp.completion_text else None
         except Exception as e: logger.error(f"[BiliBot] LLM 调用失败: {e}"); return None
     def _get_system_prompt(self):
         if self.config.get("USE_ASTRBOT_PERSONA",True):
@@ -412,9 +426,7 @@ class BiliBiliBot(Star):
             fs = f"\n特殊日期：{fest}" if fest else ""
             now = datetime.now().strftime("%Y-%m-%d %H:%M")
             prompt = f"""{lp}\n\n【底线】拒绝：表白暧昧、引战、黄赌毒政治。\n\n【今日状态】{mood} — {mp}{fs}\n\n当前时间：{now}{ms}\n\n「{username}」{'（这是'+on+'）' if is_owner else ''}的评论：「{content}」\n\n请以JSON格式回复：\n{{"score_delta": 数字, "reply": "回复内容", "impression": "印象", "user_facts": ["个人信息"], "permanent_memory": "永久记忆(没有则留空)"}}\n\nscore_delta：友善+2，普通+1，不友善-2，辱骂-5。reply不超过50字。"""
-            mt = self.config.get("REPLY_MAX_TOKENS",300)
-            if self.config.get("USE_CUSTOM_API",False): rt = await self._call_custom_api(sp, prompt, mt)
-            else: rt = await self._call_astrbot_provider(sp, prompt)
+            rt = await self._llm_call(prompt, system_prompt=sp)
             if not rt: return None
             rt = rt.replace("```json","").replace("```","").strip()
             try: r = json.loads(rt)
@@ -423,23 +435,6 @@ class BiliBiliBot(Star):
                 r = json.loads(m.group()) if m else {"score_delta":1,"reply":rt[:50],"impression":"","user_facts":[],"permanent_memory":""}
             return {"score_delta":r.get("score_delta",1),"reply":r.get("reply",""),"impression":r.get("impression",""),"user_facts":r.get("user_facts",[]),"permanent_memory":r.get("permanent_memory","")}
         except Exception as e: logger.error(f"[BiliBot] 回复生成失败: {e}\n{traceback.format_exc()}"); return None
-    async def _call_custom_api(self, system_prompt, prompt, max_tokens):
-        from openai import AsyncOpenAI
-        bu,ak,md = self.config.get("API_BASE_URL",""),self.config.get("API_KEY",""),self.config.get("API_MODEL","")
-        if not all([bu,ak,md]): return None
-        c = AsyncOpenAI(api_key=ak, base_url=bu)
-        resp = await c.chat.completions.create(model=md, max_tokens=max_tokens, messages=[{"role":"system","content":system_prompt},{"role":"user","content":prompt}])
-        return resp.choices[0].message.content.strip() if resp.choices and resp.choices[0].message.content else None
-    async def _call_astrbot_provider(self, system_prompt, prompt):
-        provider = self.context.get_using_provider()
-        if not provider: logger.error("[BiliBot] 没有可用的 LLM provider"); return None
-        resp = await provider.text_chat(prompt=prompt, session_id="bili_reply", contexts=[], system_prompt=system_prompt)
-        if resp:
-            if hasattr(resp,'completion_text') and resp.completion_text: return resp.completion_text.strip()
-            elif hasattr(resp,'result_chain') and resp.result_chain:
-                for comp in resp.result_chain.chain:
-                    if hasattr(comp,'text') and comp.text: return comp.text.strip()
-        return None
 
     # ===== B站API =====
     def _send_reply(self, oid, rpid, reply_type, content):
@@ -550,9 +545,48 @@ class BiliBiliBot(Star):
             lv=self._get_level(sc,uid); imp=ps.get(uid,{}).get("impression","")
             lines.append(f"{i}. UID:{uid} | {sc}分 {LEVEL_NAMES[lv]}{' — '+imp[:20] if imp else ''}")
         yield event.plain_result("\n".join(lines))
+    @filter.command("bili拉黑")
+    async def cmd_block(self, event: AstrMessageEvent):
+        """手动拉黑用户。用法: /bili拉黑 <UID>"""
+        parts = event.message_str.strip().split(maxsplit=1)
+        if len(parts)<2: yield event.plain_result("用法: /bili拉黑 <UID>"); return
+        uid=parts[1].strip()
+        if not uid.isdigit(): yield event.plain_result("❌ UID必须是数字"); return
+        if uid==str(self.config.get("OWNER_MID","")): yield event.plain_result("❌ 不能拉黑主人！"); return
+        success = self._block_user(int(uid))
+        bl = self._load_json(os.path.join(DATA_DIR,"block_log.json"),{})
+        bl[uid] = {"username":"手动拉黑","reason":"手动拉黑","time":datetime.now().strftime("%Y-%m-%d %H:%M")}
+        self._save_json(os.path.join(DATA_DIR,"block_log.json"), bl)
+        yield event.plain_result(f"{'✅' if success else '⚠️'} 已拉黑 UID:{uid}{'（B站API调用成功）' if success else '（B站API失败，但已加入本地黑名单）'}")
+    @filter.command("bili解黑")
+    async def cmd_unblock(self, event: AstrMessageEvent):
+        """解除拉黑。用法: /bili解黑 <UID>"""
+        parts = event.message_str.strip().split(maxsplit=1)
+        if len(parts)<2: yield event.plain_result("用法: /bili解黑 <UID>"); return
+        uid=parts[1].strip()
+        bl = self._load_json(os.path.join(DATA_DIR,"block_log.json"),{})
+        if uid not in bl: yield event.plain_result(f"⚠️ UID:{uid} 不在黑名单中"); return
+        # B站解除拉黑: act=6
+        try:
+            resp = requests.post("https://api.bilibili.com/x/relation/modify", headers=self._headers(), data={"fid":uid,"act":6,"re_src":11,"csrf":self.config.get("BILI_JCT","")}, timeout=10)
+            api_ok = resp.json()["code"]==0
+        except: api_ok=False
+        del bl[uid]; self._save_json(os.path.join(DATA_DIR,"block_log.json"), bl)
+        # 重置好感度为0
+        self._affection[uid] = 0; self._save_json(AFFECTION_FILE, self._affection)
+        yield event.plain_result(f"✅ 已解除拉黑 UID:{uid}，好感度重置为0{'' if api_ok else '（B站API失败，但已从本地黑名单移除）'}")
+    @filter.command("bili黑名单")
+    async def cmd_blocklist(self, event: AstrMessageEvent):
+        """查看拉黑名单"""
+        bl = self._load_json(os.path.join(DATA_DIR,"block_log.json"),{})
+        if not bl: yield event.plain_result("🚫 黑名单为空"); return
+        lines = ["🚫 黑名单","━━━━━━━━━━━━"]
+        for uid,info in bl.items():
+            lines.append(f"UID:{uid} | {info.get('reason','未知')} | {info.get('time','')}")
+        yield event.plain_result("\n".join(lines))
     @filter.command("bili帮助")
     async def cmd_help(self, event: AstrMessageEvent):
-        yield event.plain_result("📺 BiliBot 命令\n━━━━━━━━━━━━\n/bili登录 — 扫码登录\n/bili确认 — 确认扫码\n/bili状态 — 运行状态\n/bili启动 — 启动\n/bili停止 — 停止\n/bili开关 — 功能开关\n/bili刷新 — 刷新Cookie\n/bili记忆 — 搜索记忆\n/bili好感 — 好感度\n/bili帮助 — 本帮助\n━━━━━━━━━━━━\n💡 首次用 /bili登录")
+        yield event.plain_result("📺 BiliBot 命令\n━━━━━━━━━━━━\n/bili登录 — 扫码登录\n/bili确认 — 确认扫码\n/bili状态 — 运行状态\n/bili启动 — 启动\n/bili停止 — 停止\n/bili开关 — 功能开关\n/bili刷新 — 刷新Cookie\n/bili记忆 — 搜索记忆\n/bili好感 — 好感度\n/bili拉黑 — 手动拉黑\n/bili解黑 — 解除拉黑\n/bili黑名单 — 查看黑名单\n/bili帮助 — 本帮助\n━━━━━━━━━━━━\n💡 首次用 /bili登录")
 
     # ===== 后台任务 =====
     async def _auto_start(self):
@@ -610,6 +644,10 @@ class BiliBiliBot(Star):
                 content=r.get("source_content",""); oid=r.get("subject_id",0); ct=r.get("business_id",1)
                 thread_id=str(r.get("root_id") or rpid)
                 if not content or not rpid: continue
+                # 拉黑用户跳过（不调LLM不花钱）
+                bl = self._load_json(os.path.join(DATA_DIR,"block_log.json"),{})
+                if mid in bl:
+                    replied.add(rpid); self._save_json(REPLIED_FILE,list(replied)); continue
                 if self._is_blocked(content):
                     self._log_security_event("keyword_blocked",mid,username,content,"关键词过滤")
                     replied.add(rpid); self._save_json(REPLIED_FILE,list(replied)); continue
