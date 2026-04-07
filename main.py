@@ -1,32 +1,28 @@
 """
-AstrBot Plugin - Bilibili Bot
-让你的 AstrBot 成为一个 B站 AI Bot：自动回复评论、主动看视频、发动态。
+AstrBot Plugin - Bilibili Bot v0.2.0
+自动回复评论、好感度、记忆、心情、用户画像、主动视频、动态发布。
 """
-import io
-import os
-import re
-import time
-import json
-import asyncio
-import hashlib
-import requests
-import traceback
+import io, os, re, time, json, math, random, asyncio, hashlib, base64, requests, traceback
 from datetime import datetime, timedelta
 from functools import reduce
-
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api.message_components import Image, Plain
 from astrbot.api import logger, AstrBotConfig
 
-# ========== 常量 ==========
 PLUGIN_NAME = "astrbot_plugin_bilibili_bot"
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 REPLIED_FILE = os.path.join(DATA_DIR, "replied.json")
 AFFECTION_FILE = os.path.join(DATA_DIR, "affection.json")
 SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule_today.json")
+MEMORY_FILE = os.path.join(DATA_DIR, "memory.json")
+PERMANENT_MEMORY_FILE = os.path.join(DATA_DIR, "permanent_memory.json")
+MOOD_FILE = os.path.join(DATA_DIR, "mood.json")
+USER_PROFILE_FILE = os.path.join(DATA_DIR, "user_profiles.json")
+MILESTONE_FILE = os.path.join(DATA_DIR, "milestones.json")
+SECURITY_LOG_FILE = os.path.join(DATA_DIR, "security_log.json")
+VIDEO_MEMORY_FILE = os.path.join(DATA_DIR, "video_memory.json")
 
-# B站 API
 BILI_NAV_URL = "https://api.bilibili.com/x/web-interface/nav"
 BILI_REPLY_URL = "https://api.bilibili.com/x/v2/reply/add"
 BILI_NOTIFY_URL = "https://api.bilibili.com/x/msgfeed/reply"
@@ -36,15 +32,8 @@ BILI_COOKIE_CONFIRM_URL = "https://passport.bilibili.com/x/passport-login/web/co
 BILI_QR_GENERATE_URL = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
 BILI_QR_POLL_URL = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll"
 
-# WBI 签名相关
-MIXIN_KEY_ENC_TAB = [
-    46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,
-    33,9,42,19,29,28,14,39,12,38,41,13,37,48,7,16,24,55,40,
-    61,26,17,0,1,60,51,30,4,22,25,54,21,56,59,6,63,57,62,11,
-    36,20,34,44,52
-]
+MIXIN_KEY_ENC_TAB = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13,37,48,7,16,24,55,40,61,26,17,0,1,60,51,30,4,22,25,54,21,56,59,6,63,57,62,11,36,20,34,44,52]
 
-# B站 RSA 公钥（Cookie刷新用）
 BILI_RSA_PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDLgd2OAkcGVtoE3ThUREbio0Eg
 Uc/prcajMKXvkCKFCWhJYJcLkcM2DKKcSeFpD/j6Boy538YXnR6VhcuUJOhH2x71
@@ -53,843 +42,629 @@ JNrRuoEUXpabUzGB8QIDAQAB
 -----END PUBLIC KEY-----"""
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+BLOCK_KEYWORDS = ["傻逼", "草泥马", "滚", "死", "废物", "智障", "脑残"]
+LEVEL_NAMES = {"special":"主人💖","close":"好友✨","friend":"熟人😊","normal":"粉丝👋","stranger":"陌生人🌙","cold":"厌恶🖤"}
+THREAD_COMPRESS_THRESHOLD = 8
+MAX_SEMANTIC_RESULTS = 3
+USER_MEMORY_COMPRESS_THRESHOLD = 20
+USER_MEMORY_KEEP_RECENT = 5
 
-
-@register(
-    "astrbot_plugin_bilibili_bot",
-    "chenluQwQ",
-    "B站 AI Bot — 自动回复评论、主动看视频、发动态",
-    "0.1.0",
-    "https://github.com/chenluQwQ/astrbot_plugin_bilibili_bot",
-)
+@register("astrbot_plugin_bilibili_bot","chenluQwQ","B站 AI Bot — 自动回复评论、主动看视频、发动态","0.2.0","https://github.com/chenluQwQ/astrbot_plugin_bilibili_bot")
 class BiliBiliBot(Star):
-    """B站 AI Bot 插件 — 评论回复、主动视频、动态发布"""
-
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
         self._ensure_data_dir()
-
-        # 运行状态
         self._running = False
-        self._task: asyncio.Task | None = None
+        self._task = None
         self._last_cookie_check = 0
-        self._login_qrcode_key = None  # 扫码登录用
-        self._first_poll = not os.path.exists(REPLIED_FILE)  # 首次运行标记
-
-        # 自动启动后台任务
+        self._login_qrcode_key = None
+        self._first_poll = not os.path.exists(REPLIED_FILE)
+        self._affection = self._load_json(AFFECTION_FILE, {})
+        self._memory = self._load_json(MEMORY_FILE, [])
+        self._embed_client = None
+        self._consecutive_llm_failures = 0  # 全局连续失败，达5次冷却
+        self._llm_cooldown_until = 0  # 冷却截止时间戳
+        self._retry_counts: dict = {}  # {rpid: 已失败次数}，单条最多重试3次
         if self._has_cookie():
             asyncio.create_task(self._auto_start())
 
-    # ================================================================
-    #  工具方法
-    # ================================================================
-
-    def _ensure_data_dir(self):
-        os.makedirs(DATA_DIR, exist_ok=True)
-
-    def _has_cookie(self) -> bool:
-        return bool(self.config.get("SESSDATA", ""))
-
-    def _headers(self) -> dict:
-        return {
-            "Cookie": f"SESSDATA={self.config.get('SESSDATA', '')}; "
-                      f"bili_jct={self.config.get('BILI_JCT', '')}; "
-                      f"DedeUserID={self.config.get('DEDE_USER_ID', '')}",
-            "User-Agent": USER_AGENT,
-            "Referer": "https://www.bilibili.com",
-        }
-
-    def _load_json(self, path: str, default=None):
-        if default is None:
-            default = {}
+    # ===== 工具 =====
+    def _ensure_data_dir(self): os.makedirs(DATA_DIR, exist_ok=True)
+    def _has_cookie(self): return bool(self.config.get("SESSDATA", ""))
+    def _headers(self):
+        return {"Cookie": f"SESSDATA={self.config.get('SESSDATA','')}; bili_jct={self.config.get('BILI_JCT','')}; DedeUserID={self.config.get('DEDE_USER_ID','')}", "User-Agent": USER_AGENT, "Referer": "https://www.bilibili.com"}
+    def _load_json(self, path, default=None):
+        if default is None: default = {}
         try:
             if os.path.exists(path):
-                with open(path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-        except Exception:
-            pass
+                with open(path,"r",encoding="utf-8") as f: return json.load(f)
+        except: pass
         return default
+    def _save_json(self, path, data):
+        with open(path,"w",encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=2)
 
-    def _save_json(self, path: str, data):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-
-    # ================================================================
-    #  B站 Cookie 管理
-    # ================================================================
-
-    def check_cookie(self) -> tuple[bool, str]:
-        """检查Cookie是否有效，返回 (valid, info)"""
-        sessdata = self.config.get("SESSDATA", "")
-        if not sessdata:
-            return False, "SESSDATA 为空"
+    # ===== Embedding =====
+    def _get_embed_client(self):
+        if self._embed_client is None:
+            api_key = self.config.get("SILICON_API_KEY","")
+            if not api_key: return None
+            from openai import OpenAI
+            self._embed_client = OpenAI(api_key=api_key, base_url="https://api.siliconflow.cn/v1")
+        return self._embed_client
+    def _get_embedding(self, text):
+        client = self._get_embed_client()
+        if not client: return None
         try:
-            resp = requests.get(BILI_NAV_URL, headers=self._headers(), timeout=10)
-            data = resp.json()
-            if data["code"] == 0:
-                uname = data["data"].get("uname", "未知")
-                mid = data["data"].get("mid", "")
-                level = data["data"].get("level_info", {}).get("current_level", 0)
-                return True, f"✅ {uname} (UID:{mid}) LV{level}"
-            return False, f"❌ Cookie 已失效 (code: {data['code']})"
+            resp = client.embeddings.create(model="BAAI/bge-m3", input=text)
+            return resp.data[0].embedding
         except Exception as e:
-            return False, f"❌ 检查失败: {e}"
+            logger.error(f"[BiliBot] Embedding 失败: {e}"); return None
+    @staticmethod
+    def _cosine_similarity(a, b):
+        dot = sum(x*y for x,y in zip(a,b))
+        na = math.sqrt(sum(x*x for x in a)); nb = math.sqrt(sum(x*x for x in b))
+        return dot/(na*nb) if na and nb else 0
 
-    def check_need_refresh(self) -> tuple[bool, str]:
-        """检查Cookie是否需要刷新"""
-        bili_jct = self.config.get("BILI_JCT", "")
-        try:
-            resp = requests.get(
-                BILI_COOKIE_INFO_URL,
-                params={"csrf": bili_jct},
-                headers=self._headers(),
-                timeout=10,
-            )
-            data = resp.json()
-            if data["code"] != 0:
-                return False, f"检查失败: {data.get('message', '')}"
-            if data["data"].get("refresh", False):
-                return True, "需要刷新"
-            return False, "Cookie 仍然有效"
-        except Exception as e:
-            return False, f"检查出错: {e}"
-
-    def _generate_correspond_path(self, timestamp_ms: int) -> str:
-        """RSA加密生成correspondPath"""
-        from cryptography.hazmat.primitives.asymmetric import padding
-        from cryptography.hazmat.primitives import hashes, serialization
-
-        public_key = serialization.load_pem_public_key(BILI_RSA_PUBLIC_KEY.encode())
-        plaintext = f"refresh_{timestamp_ms}".encode()
-        ciphertext = public_key.encrypt(
-            plaintext,
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None,
-            ),
-        )
-        return ciphertext.hex()
-
-    def refresh_cookie(self) -> tuple[bool, str]:
-        """完整的Cookie刷新流程"""
-        rt = self.config.get("REFRESH_TOKEN", "")
-        if not rt:
-            return False, "没有 REFRESH_TOKEN，无法自动刷新"
-        sessdata = self.config.get("SESSDATA", "")
-        bili_jct = self.config.get("BILI_JCT", "")
-        if not sessdata:
-            return False, "SESSDATA 为空"
-
-        try:
-            # 1. 检查是否需要刷新
-            need, msg = self.check_need_refresh()
-            if not need:
-                return True, msg
-
-            # 2. 生成 correspondPath
-            ts = int(time.time() * 1000)
-            correspond_path = self._generate_correspond_path(ts)
-
-            # 3. 获取 refresh_csrf
-            url = f"https://www.bilibili.com/correspond/1/{correspond_path}"
-            resp = requests.get(url, headers=self._headers(), timeout=10)
-            match = re.search(r'<div\s+id="1-name"\s*>([^<]+)</div>', resp.text)
-            if not match:
-                return False, "无法提取 refresh_csrf"
-            refresh_csrf = match.group(1).strip()
-
-            # 4. 刷新
-            resp = requests.post(
-                BILI_COOKIE_REFRESH_URL,
-                headers=self._headers(),
-                data={
-                    "csrf": bili_jct,
-                    "refresh_csrf": refresh_csrf,
-                    "source": "main_web",
-                    "refresh_token": rt,
-                },
-                timeout=10,
-            )
-            result = resp.json()
-            if result["code"] != 0:
-                return False, f"刷新失败: {result.get('message', result['code'])}"
-
-            new_rt = result["data"].get("refresh_token", "")
-            updates = {}
-            if new_rt:
-                updates["REFRESH_TOKEN"] = new_rt
-            for cookie in resp.cookies:
-                if cookie.name == "SESSDATA":
-                    updates["SESSDATA"] = cookie.value
-                elif cookie.name == "bili_jct":
-                    updates["BILI_JCT"] = cookie.value
-                elif cookie.name == "DedeUserID":
-                    updates["DEDE_USER_ID"] = cookie.value
-
-            if "SESSDATA" not in updates:
-                return False, "刷新响应中未找到新 SESSDATA"
-
-            # 5. 确认（用旧 refresh_token）
-            try:
-                confirm_headers = dict(self._headers())
-                confirm_headers["Cookie"] = (
-                    f"SESSDATA={updates['SESSDATA']}; "
-                    f"bili_jct={updates.get('BILI_JCT', bili_jct)}"
-                )
-                requests.post(
-                    BILI_COOKIE_CONFIRM_URL,
-                    headers=confirm_headers,
-                    data={"csrf": updates.get("BILI_JCT", bili_jct), "refresh_token": rt},
-                    timeout=10,
-                )
-            except Exception:
-                pass
-
-            # 保存新Cookie到配置
-            for k, v in updates.items():
-                self.config[k] = v
-            self.config.save_config()
-
-            return True, f"✅ Cookie 刷新成功！SESSDATA: {updates['SESSDATA'][:8]}..."
-
-        except Exception as e:
-            return False, f"刷新出错: {e}"
-
-    # ================================================================
-    #  WBI 签名（B站反爬）
-    # ================================================================
-
-    def _get_wbi_keys(self) -> tuple[str, str]:
-        """获取 wbi_img_key 和 wbi_sub_key"""
-        resp = requests.get(BILI_NAV_URL, headers=self._headers(), timeout=10)
-        data = resp.json()["data"]["wbi_img"]
-        img_url = data["img_url"]
-        sub_url = data["sub_url"]
-        img_key = img_url.rsplit("/", 1)[1].split(".")[0]
-        sub_key = sub_url.rsplit("/", 1)[1].split(".")[0]
-        return img_key, sub_key
-
-    def _get_mixin_key(self, orig: str) -> str:
-        return reduce(lambda s, i: s + orig[i], MIXIN_KEY_ENC_TAB, "")[:32]
-
-    def sign_wbi_params(self, params: dict) -> dict:
-        """WBI签名"""
-        try:
-            img_key, sub_key = self._get_wbi_keys()
-            mixin_key = self._get_mixin_key(img_key + sub_key)
-            params["wts"] = int(time.time())
-            params = dict(sorted(params.items()))
-            query = "&".join(f"{k}={v}" for k, v in params.items())
-            params["w_rid"] = hashlib.md5((query + mixin_key).encode()).hexdigest()
-            return params
-        except Exception:
-            return params
-
-    # ================================================================
-    #  扫码登录
-    # ================================================================
-
-    async def _qr_login_generate(self) -> tuple[str | None, str | None]:
-        """生成登录二维码，返回 (qr_url, qrcode_key)"""
-        try:
-            resp = requests.get(BILI_QR_GENERATE_URL, headers={"User-Agent": USER_AGENT}, timeout=10)
-            logger.debug(f"[BiliBot] 二维码API响应: status={resp.status_code}, body={resp.text[:200]}")
-            data = resp.json()
-            if data["code"] == 0:
-                return data["data"]["url"], data["data"]["qrcode_key"]
-        except Exception as e:
-            logger.error(f"生成二维码失败: {e}")
-        return None, None
-
-    async def _qr_login_poll(self, qrcode_key: str) -> tuple[int, str, dict]:
-        """轮询扫码状态，返回 (code, message, cookies_dict)"""
-        try:
-            resp = requests.get(
-                BILI_QR_POLL_URL,
-                params={"qrcode_key": qrcode_key},
-                headers={"User-Agent": USER_AGENT},
-                timeout=10,
-            )
-            data = resp.json()["data"]
-            code = data["code"]
-            msg_map = {
-                0: "登录成功",
-                86038: "二维码已失效",
-                86090: "已扫码，请在手机上确认",
-                86101: "等待扫码中...",
-            }
-            cookies = {}
-            if code == 0:
-                # 从 url 参数中提取 cookie
-                url = data.get("url", "")
-                refresh_token = data.get("refresh_token", "")
-                if url:
-                    from urllib.parse import urlparse, parse_qs
-                    parsed = parse_qs(urlparse(url).query)
-                    cookies = {
-                        "SESSDATA": parsed.get("SESSDATA", [""])[0],
-                        "bili_jct": parsed.get("bili_jct", [""])[0],
-                        "DedeUserID": parsed.get("DedeUserID", [""])[0],
-                        "REFRESH_TOKEN": refresh_token,
-                    }
-                # 也从 response cookies 里取
-                for c in resp.cookies:
-                    if c.name in ("SESSDATA", "bili_jct", "DedeUserID"):
-                        cookies[c.name] = c.value
-
-            return code, msg_map.get(code, f"未知状态({code})"), cookies
-        except Exception as e:
-            return -1, f"轮询失败: {e}", {}
-
-    # ================================================================
-    #  QQ 命令
-    # ================================================================
-
-    @filter.command("bili登录")
-    async def cmd_login(self, event: AstrMessageEvent):
-        """扫码登录B站，Bot会发送二维码图片"""
-        qr_url, qrcode_key = await self._qr_login_generate()
-        if not qr_url:
-            yield event.plain_result("❌ 生成二维码失败，请稍后重试")
-            return
-
-        self._login_qrcode_key = qrcode_key
-
-        # 生成二维码图片
-        import qrcode
-        qr = qrcode.QRCode(version=1, box_size=8, border=2)
-        qr.add_data(qr_url)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white")
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        buf.seek(0)
-
-        # 保存到临时文件
-        qr_path = os.path.join(DATA_DIR, "login_qr.png")
-        with open(qr_path, "wb") as f:
-            f.write(buf.getvalue())
-
-        chain = [
-            Plain("📱 请用B站APP扫描下方二维码登录：\n扫码后发送 /bili确认 来完成登录"),
-            Image.fromFileSystem(qr_path),
-        ]
-        yield event.chain_result(chain)
-
-    @filter.command("bili确认")
-    async def cmd_login_confirm(self, event: AstrMessageEvent):
-        """确认扫码登录"""
-        if not self._login_qrcode_key:
-            yield event.plain_result("❌ 没有待确认的登录，请先发 /bili登录")
-            return
-
-        # 轮询几次
-        for i in range(3):
-            code, msg, cookies = await self._qr_login_poll(self._login_qrcode_key)
-
-            if code == 0:
-                # 登录成功，保存Cookie
-                if cookies.get("SESSDATA"):
-                    self.config["SESSDATA"] = cookies["SESSDATA"]
-                if cookies.get("bili_jct"):
-                    self.config["BILI_JCT"] = cookies["bili_jct"]
-                if cookies.get("DedeUserID"):
-                    self.config["DEDE_USER_ID"] = cookies["DedeUserID"]
-                if cookies.get("REFRESH_TOKEN"):
-                    self.config["REFRESH_TOKEN"] = cookies["REFRESH_TOKEN"]
-                self.config.save_config()
-                self._login_qrcode_key = None
-
-                # 验证
-                valid, info = self.check_cookie()
-                yield event.plain_result(f"✅ 登录成功！\n{info}")
-
-                # 自动启动后台任务
-                if not self._running:
-                    await self._start_bot()
-                    yield event.plain_result("🚀 后台任务已自动启动")
-                return
-
-            elif code == 86090:
-                yield event.plain_result(f"📱 {msg}，请在手机上点确认")
-                await asyncio.sleep(2)
-
-            elif code == 86101:
-                yield event.plain_result(f"⏳ {msg}")
-                await asyncio.sleep(2)
-
-            else:
-                self._login_qrcode_key = None
-                yield event.plain_result(f"❌ {msg}")
-                return
-
-        yield event.plain_result("⏳ 还在等待中，请在手机上确认后再发一次 /bili确认")
-
-    @filter.command("bili状态")
-    async def cmd_status(self, event: AstrMessageEvent):
-        """查看Bot运行状态"""
-        lines = []
-
-        # Cookie 状态
-        valid, info = self.check_cookie()
-        lines.append(f"🍪 Cookie: {info}")
-
-        # 运行状态
-        lines.append(f"🤖 后台任务: {'运行中 ✅' if self._running else '未运行 ❌'}")
-
-        # 功能开关
-        switches = []
-        if self.config.get("ENABLE_REPLY", True):
-            switches.append("评论回复")
-        if self.config.get("ENABLE_PROACTIVE", True):
-            switches.append("主动视频")
-        if self.config.get("ENABLE_DYNAMIC", True):
-            switches.append("动态发布")
-        if self.config.get("ENABLE_AFFECTION", True):
-            switches.append("好感度")
-        lines.append(f"⚙️ 已开启: {', '.join(switches) if switches else '无'}")
-
-        # 今日数据
-        schedule = self._load_json(SCHEDULE_FILE)
-        if schedule.get("date") == datetime.now().strftime("%Y-%m-%d"):
-            triggered = schedule.get("proactive_triggered", [])
-            total = schedule.get("proactive_times", [])
-            lines.append(f"📊 今日主动: {len(triggered)}/{len(total)}")
-            lines.append(f"📢 今日动态: {'已发' if schedule.get('dynamic_triggered') else '未发'}")
-
-        # 已回复数
-        replied = self._load_json(REPLIED_FILE, [])
-        if isinstance(replied, list):
-            lines.append(f"💬 累计回复: {len(replied)} 条")
-
-        yield event.plain_result("\n".join(lines))
-
-    @filter.command("bili启动")
-    async def cmd_start(self, event: AstrMessageEvent):
-        """启动后台任务"""
-        if self._running:
-            yield event.plain_result("⚠️ 已经在运行了")
-            return
-        if not self._has_cookie():
-            yield event.plain_result("❌ 请先用 /bili登录 扫码登录B站")
-            return
-        await self._start_bot()
-        yield event.plain_result("🚀 后台任务已启动！")
-
-    @filter.command("bili停止")
-    async def cmd_stop(self, event: AstrMessageEvent):
-        """停止后台任务"""
-        if not self._running:
-            yield event.plain_result("⚠️ 没有在运行")
-            return
-        await self._stop_bot()
-        yield event.plain_result("⏹️ 后台任务已停止")
-
-    @filter.command("bili开关")
-    async def cmd_toggle(self, event: AstrMessageEvent):
-        """切换功能开关。用法: /bili开关 <功能名>"""
-        msg = event.message_str.strip()
-        # 去掉命令前缀
-        parts = msg.split(maxsplit=1)
-        if len(parts) < 2:
-            lines = [
-                "可切换的功能：",
-                f"  回复 — 评论自动回复 ({'✅' if self.config.get('ENABLE_REPLY', True) else '❌'})",
-                f"  主动 — 主动看视频 ({'✅' if self.config.get('ENABLE_PROACTIVE', True) else '❌'})",
-                f"  动态 — 自动发动态 ({'✅' if self.config.get('ENABLE_DYNAMIC', True) else '❌'})",
-                f"  好感 — 好感度系统 ({'✅' if self.config.get('ENABLE_AFFECTION', True) else '❌'})",
-                f"  心情 — 心情系统 ({'✅' if self.config.get('ENABLE_MOOD', True) else '❌'})",
-                f"  点赞 — 主动点赞 ({'✅' if self.config.get('PROACTIVE_LIKE', True) else '❌'})",
-                f"  投币 — 主动投币 ({'✅' if self.config.get('PROACTIVE_COIN', False) else '❌'})",
-                f"  收藏 — 主动收藏 ({'✅' if self.config.get('PROACTIVE_FAV', True) else '❌'})",
-                f"  关注 — 主动关注 ({'✅' if self.config.get('PROACTIVE_FOLLOW', True) else '❌'})",
-                f"  评论 — 主动评论 ({'✅' if self.config.get('PROACTIVE_COMMENT', True) else '❌'})",
-                "",
-                "用法: /bili开关 回复",
-            ]
-            yield event.plain_result("\n".join(lines))
-            return
-
-        name = parts[1].strip()
-        toggle_map = {
-            "回复": "ENABLE_REPLY",
-            "主动": "ENABLE_PROACTIVE",
-            "动态": "ENABLE_DYNAMIC",
-            "好感": "ENABLE_AFFECTION",
-            "心情": "ENABLE_MOOD",
-            "点赞": "PROACTIVE_LIKE",
-            "投币": "PROACTIVE_COIN",
-            "收藏": "PROACTIVE_FAV",
-            "关注": "PROACTIVE_FOLLOW",
-            "评论": "PROACTIVE_COMMENT",
+    # ===== 好感度 =====
+    def _get_level(self, score, mid=None):
+        if str(mid)==str(self.config.get("OWNER_MID","")): return "special"
+        if score<=-10: return "cold"
+        if score>=51: return "close"
+        if score>=31: return "friend"
+        if score>=11: return "normal"
+        return "stranger"
+    def _get_level_prompts(self):
+        on = self.config.get("OWNER_NAME","") or "主人"
+        return {
+            "special": f"这是你的主人{on}。内心：深深的喜爱和依恋。外在：随意、自然、可以撒娇。语气：宠溺、温柔、像亲人。",
+            "close":"这是你的好友（好感度高）。内心：真诚关心。外在：温柔亲近。语气：温暖、真实、可以调皮。",
+            "friend":"这是熟悉的粉丝（好感度中）。内心：放松和信任。外在：自然，话变多。语气：友好、轻松、偶尔调侃。",
+            "normal":"这是普通粉丝（好感度低）。保持善意，温和有礼但保持距离。语气：简洁、客气。",
+            "stranger":"这是陌生人。保持礼貌和善意，简洁客气。",
+            "cold":"这个人多次恶意攻击你。平静坚定划清界限，回复极简短，不恶语相向。",
         }
+    def _check_milestone(self, mid, old_score, new_score, username):
+        mm = {10:f"「{username}」，你对我来说不再是陌生人了哦。",30:f"不知不觉就和「{username}」变熟了呢。",50:f"「{username}」...我们算是好朋友了吧？",80:f"能和「{username}」走到这一步，我挺开心的。",99:f"「{username}」，你是我最重要的人之一。"}
+        triggered = self._load_json(MILESTONE_FILE, {})
+        um = triggered.get(str(mid), [])
+        for t,msg in mm.items():
+            if old_score < t <= new_score and t not in um:
+                um.append(t); triggered[str(mid)]=um; self._save_json(MILESTONE_FILE, triggered)
+                logger.info(f"[BiliBot] 🏆 里程碑！{username} 达到 {t} 分"); return msg
+        return None
+    @staticmethod
+    def _is_blocked(text): return any(kw in text for kw in BLOCK_KEYWORDS)
+    def _block_user(self, mid):
+        try:
+            resp = requests.post("https://api.bilibili.com/x/relation/modify", headers=self._headers(), data={"fid":mid,"act":5,"re_src":11,"csrf":self.config.get("BILI_JCT","")}, timeout=10)
+            return resp.json()["code"]==0
+        except: return False
+    def _log_security_event(self, event_type, mid, username, content, detail):
+        logs = self._load_json(SECURITY_LOG_FILE, [])
+        logs.append({"time":datetime.now().strftime("%Y-%m-%d %H:%M"),"type":event_type,"uid":str(mid),"username":username,"content":content[:200],"detail":detail})
+        self._save_json(SECURITY_LOG_FILE, logs[-500:])
 
-        key = toggle_map.get(name)
-        if not key:
-            yield event.plain_result(f"❌ 不认识的功能名：{name}")
-            return
+    # ===== 用户画像 =====
+    def _get_user_profile_context(self, mid):
+        profiles = self._load_json(USER_PROFILE_FILE, {})
+        p = profiles.get(str(mid))
+        if not p: return ""
+        parts = []
+        if p.get("impression"): parts.append(f"印象：{p['impression']}")
+        if p.get("facts"): parts.append("已知信息：" + "；".join(p["facts"][-10:]))
+        if p.get("tags"): parts.append("标签：" + "、".join(p["tags"]))
+        return "【对该用户的了解】\n" + "\n".join(parts) if parts else ""
+    def _update_user_profile(self, mid, impression=None, new_facts=None, new_tags=None):
+        profiles = self._load_json(USER_PROFILE_FILE, {})
+        uid = str(mid)
+        if uid not in profiles: profiles[uid] = {"impression":"","facts":[],"tags":[]}
+        if impression: profiles[uid]["impression"] = impression
+        if new_facts:
+            ex = profiles[uid].get("facts",[])
+            for f in new_facts:
+                f=f.strip()
+                if f and f not in ex: ex.append(f)
+            profiles[uid]["facts"] = ex[-20:]
+        if new_tags:
+            et = profiles[uid].get("tags",[])
+            for t in new_tags:
+                t=t.strip()
+                if t and t not in et: et.append(t)
+            profiles[uid]["tags"] = et[-10:]
+        self._save_json(USER_PROFILE_FILE, profiles)
 
-        current = self.config.get(key, True)
-        self.config[key] = not current
-        self.config.save_config()
-        status = "✅ 已开启" if not current else "❌ 已关闭"
-        yield event.plain_result(f"{name}: {status}")
+    # ===== 心情 =====
+    def _get_today_mood(self):
+        if not self.config.get("ENABLE_MOOD",True): return "🌙 平静如常",""
+        md = self._load_json(MOOD_FILE, {})
+        today = datetime.now().strftime("%Y-%m-%d")
+        if md.get("date")==today: return md["mood"],md["mood_prompt"]
+        moods = [("☀️ 心情不错","语气稍微轻快一点。"),("🌙 平静如常","按正常性格回复。"),("🌧️ 有点安静","话少一点。"),("😏 有点皮","偶尔多一点调侃。"),("🧊 懒得废话","回复更简洁。")]
+        mood,mp = random.choice(moods)
+        self._save_json(MOOD_FILE, {"date":today,"mood":mood,"mood_prompt":mp})
+        return mood,mp
+    def _get_festival_prompt(self):
+        today = datetime.now().strftime("%m-%d")
+        try:
+            from lunardate import LunarDate
+            l = LunarDate.fromSolarDate(datetime.now().year,datetime.now().month,datetime.now().day)
+            lunar_md = f"{l.month:02d}-{l.day:02d}"
+        except: lunar_md = ""
+        fests = {"01-01":"今天是元旦！语气温暖。","02-14":"今天是情人节。","04-01":"今天是愚人节！可以开小玩笑。","05-01":"今天是劳动节。","10-31":"今天是万圣节，语气神秘。","12-25":"今天是圣诞节，语气温柔。","12-31":"今天是跨年夜。"}
+        lfests = {"01-01":"今天是春节！热情说新年快乐。","01-15":"今天是元宵节。","05-05":"今天是端午节。","08-15":"今天是中秋节。"}
+        return fests.get(today,"") or lfests.get(lunar_md,"")
 
-    @filter.command("bili刷新")
-    async def cmd_refresh_cookie(self, event: AstrMessageEvent):
-        """手动刷新B站Cookie"""
-        yield event.plain_result("🔄 正在刷新 Cookie...")
-        success, msg = self.refresh_cookie()
-        yield event.plain_result(msg)
-
-    @filter.command("bili帮助")
-    async def cmd_help(self, event: AstrMessageEvent):
-        """显示帮助信息"""
-        help_text = (
-            "📺 Bilibili Bot 命令列表\n"
-            "━━━━━━━━━━━━━━━━\n"
-            "/bili登录 — 扫码登录B站\n"
-            "/bili确认 — 确认扫码\n"
-            "/bili状态 — 查看运行状态\n"
-            "/bili启动 — 启动后台任务\n"
-            "/bili停止 — 停止后台任务\n"
-            "/bili开关 — 切换功能开关\n"
-            "/bili刷新 — 手动刷新Cookie\n"
-            "/bili帮助 — 显示本帮助\n"
-            "━━━━━━━━━━━━━━━━\n"
-            "💡 首次使用请先 /bili登录"
-        )
-        yield event.plain_result(help_text)
-
-    # ================================================================
-    #  后台任务
-    # ================================================================
-
-    async def _auto_start(self):
-        """插件加载时自动启动"""
-        await asyncio.sleep(3)  # 等AstrBot初始化完成
-        valid, _ = self.check_cookie()
-        if valid:
-            await self._start_bot()
-            logger.info("[BiliBot] Cookie有效，后台任务自动启动")
+    # ===== 记忆系统 =====
+    def _save_memory_record(self, rpid, thread_id, user_id, username, content, reply_text, source="bilibili"):
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        text = f"[{now}] 用户{user_id}({username})说：{content} | Bot回复：{reply_text}"
+        emb = self._get_embedding(text)
+        rec = {"rpid":str(rpid),"thread_id":str(thread_id),"user_id":str(user_id),"time":now,"text":text,"source":source}
+        if emb: rec["embedding"]=emb
+        self._memory.append(rec); self._save_json(MEMORY_FILE, self._memory)
+    def _get_thread_memories(self, thread_id):
+        docs = [m for m in self._memory if m.get("thread_id")==str(thread_id)]
+        docs.sort(key=lambda x:x.get("time",""))
+        return [m["text"] for m in docs]
+    def _get_user_semantic_memories(self, user_id, query_text):
+        um = [m for m in self._memory if m.get("user_id")==str(user_id) and not m.get("text","").startswith("[记忆压缩]") and "embedding" in m]
+        if not um: return []
+        qe = self._get_embedding(query_text)
+        if not qe: return []
+        scored = [(self._cosine_similarity(qe, m["embedding"]), m["text"]) for m in um]
+        scored.sort(reverse=True)
+        return [t for s,t in scored[:MAX_SEMANTIC_RESULTS] if s>0.6]
+    def _search_memories(self, query_text, limit=5, source=None):
+        cands = self._memory
+        if source: cands = [m for m in cands if m.get("source")==source]
+        cands = [m for m in cands if "embedding" in m]
+        if not cands: return []
+        qe = self._get_embedding(query_text)
+        if not qe: return []
+        scored = [(self._cosine_similarity(qe,m["embedding"]),m) for m in cands]
+        scored.sort(reverse=True)
+        results = []
+        for s,m in scored[:limit]:
+            if s>0.5:
+                tag = f"[{m.get('source','?')}]" if not source else ""
+                results.append(f"{tag}{m['text']}")
+        return results
+    async def _compress_user_memory(self, user_id, username):
+        um = [m for m in self._memory if m.get("user_id")==str(user_id)]
+        if len(um) <= USER_MEMORY_COMPRESS_THRESHOLD: return
+        logger.info(f"[BiliBot] 🗜️ {username} 记忆达 {len(um)} 条，压缩...")
+        um.sort(key=lambda x:x.get("time","")); old = um[:-USER_MEMORY_KEEP_RECENT]
+        old_texts = "\n".join([m["text"] for m in old])
+        prompt = f'请根据以下与用户"{username}"的历史互动，完成：\n1. 总结（100字以内）\n2. 3-5个标签\n3. 提取用户个人信息\n\n历史：\n{old_texts[:3000]}\n\nJSON格式：{{"summary":"","tags":[],"user_facts":[]}}'
+        try:
+            text = await self._llm_call(prompt, max_tokens=400)
+            if not text: return
+            text = text.replace("```json","").replace("```","").strip()
+            try: result = json.loads(text)
+            except:
+                m = re.search(r'\{.*\}', text, re.DOTALL)
+                result = json.loads(m.group()) if m else {"summary":text[:100],"tags":[],"user_facts":[]}
+            self._update_user_profile(user_id, impression=result.get("summary") or None, new_facts=result.get("user_facts") or None, new_tags=result.get("tags") or None)
+            now = datetime.now().strftime("%Y-%m-%d %H:%M")
+            emb = self._get_embedding(result.get("summary",""))
+            comp = {"rpid":f"compressed_{int(datetime.now().timestamp())}","thread_id":"compressed","user_id":str(user_id),"time":now,"text":f"[记忆压缩] {result.get('summary','')}","source":"bilibili"}
+            if emb: comp["embedding"]=emb
+            old_rpids = {m["rpid"] for m in old}
+            self._memory = [m for m in self._memory if m.get("rpid") not in old_rpids]
+            self._memory.append(comp); self._save_json(MEMORY_FILE, self._memory)
+            logger.info(f"[BiliBot] 🗜️ 压缩完成：{len(old)} 条 → 1 条")
+        except Exception as e: logger.error(f"[BiliBot] 记忆压缩失败：{e}")
+    def _build_memory_context(self, thread_id, user_id, query_text, video_context=""):
+        parts = []
+        if video_context: parts.append(video_context)
+        perm = self._load_json(PERMANENT_MEMORY_FILE, [])
+        if perm: parts.append("【Bot的自我认知】\n" + "\n".join([f"[{p.get('time','?')}] {p['text']}" for p in perm[-20:]]))
+        upc = self._get_user_profile_context(user_id)
+        if upc: parts.append(upc)
+        td = self._get_thread_memories(thread_id)
+        if td:
+            if len(td)>THREAD_COMPRESS_THRESHOLD: parts.append("【本评论线近期对话】\n"+"\n".join(td[-4:]))
+            else: parts.append("【本评论线对话】\n"+"\n".join(td))
         else:
-            logger.warning("[BiliBot] Cookie无效，等待登录")
+            sd = self._get_user_semantic_memories(user_id, query_text)
+            if sd: parts.append("【相关历史记忆】\n"+"\n".join(sd))
+        return "\n\n".join(parts) if parts else ""
 
-    async def _start_bot(self):
-        if self._running:
-            return
-        self._running = True
-        self._task = asyncio.create_task(self._main_loop())
-        logger.info("[BiliBot] 后台任务启动")
-
-    async def _stop_bot(self):
-        self._running = False
-        if self._task:
-            self._task.cancel()
-            self._task = None
-        logger.info("[BiliBot] 后台任务停止")
-
-    async def _main_loop(self):
-        """主循环 — 评论轮询 + 定时任务调度"""
-        logger.info("[BiliBot] 主循环开始")
-
-        while self._running:
-            try:
-                now = datetime.now()
-                hour = now.hour
-
-                # 休眠时段
-                sleep_start = self.config.get("SLEEP_START", 2)
-                sleep_end = self.config.get("SLEEP_END", 8)
-                if sleep_start <= hour < sleep_end:
-                    await asyncio.sleep(60)
-                    continue
-
-                # 定期检查 Cookie
-                cookie_interval = self.config.get("COOKIE_CHECK_INTERVAL", 6) * 3600
-                if time.time() - self._last_cookie_check > cookie_interval:
-                    await self._check_and_refresh_cookie()
-                    self._last_cookie_check = time.time()
-
-                # 评论回复
-                if self.config.get("ENABLE_REPLY", True):
-                    await self._poll_and_reply()
-
-                # TODO: 主动视频调度
-                # if self.config.get("ENABLE_PROACTIVE", True):
-                #     await self._maybe_proactive()
-
-                # TODO: 动态发布调度
-                # if self.config.get("ENABLE_DYNAMIC", True):
-                #     await self._maybe_dynamic()
-
-                poll_interval = self.config.get("POLL_INTERVAL", 20)
-                await asyncio.sleep(poll_interval)
-
-            except asyncio.CancelledError:
-                logger.info("[BiliBot] 主循环被取消")
-                break
-            except Exception as e:
-                logger.error(f"[BiliBot] 主循环出错: {e}\n{traceback.format_exc()}")
-                await asyncio.sleep(30)
-
-        self._running = False
-        logger.info("[BiliBot] 主循环结束")
-
-    async def _check_and_refresh_cookie(self):
-        """检查并自动刷新Cookie"""
-        valid, info = self.check_cookie()
-        if valid:
-            logger.info(f"[BiliBot] Cookie 检查通过: {info}")
-            return
-
-        logger.warning(f"[BiliBot] Cookie 失效: {info}")
-        if self.config.get("COOKIE_AUTO_REFRESH", True):
-            success, msg = self.refresh_cookie()
-            if success:
-                logger.info(f"[BiliBot] Cookie 自动刷新成功: {msg}")
-            else:
-                logger.error(f"[BiliBot] Cookie 刷新失败: {msg}")
-
-    async def _poll_and_reply(self):
-        """轮询B站通知并回复评论"""
+    # ===== 视频信息 =====
+    def _oid_to_bvid(self, oid):
         try:
-            resp = requests.get(
-                BILI_NOTIFY_URL,
-                headers=self._headers(),
-                params={"ps": 10, "pn": 1},
-                timeout=10,
-            )
-            data = resp.json()
-            if data["code"] != 0:
-                logger.warning(f"[BiliBot] 获取通知失败: {data.get('message', data['code'])}")
-                return
-
-            items = data.get("data", {}).get("items", [])
-            if not items:
-                return
-
-            replied = set(self._load_json(REPLIED_FILE, []))
-
-            # 首次运行：标记所有现有评论为已读，不回复
-            if self._first_poll:
-                for item in items:
-                    rpid = str(item.get("item", {}).get("source_id", ""))
-                    if rpid:
-                        replied.add(rpid)
-                self._save_json(REPLIED_FILE, list(replied))
-                self._first_poll = False
-                logger.info(f"[BiliBot] 首次运行，标记 {len(items)} 条旧评论为已读")
-                return
-
-            count = 0
-            max_replies = self.config.get("MAX_REPLIES_PER_RUN", 3)
-
-            for item in items:
-                if count >= max_replies:
-                    break
-
-                r = item.get("item", {})
-                rpid = str(r.get("source_id", ""))
-                if rpid in replied:
-                    continue
-
-                mid = str(item.get("user", {}).get("mid", ""))
-                username = item.get("user", {}).get("nickname", "")
-                content = r.get("source_content", "")
-                oid = r.get("subject_id", 0)
-                comment_type = r.get("business_id", 1)
-
-                if not content or not rpid:
-                    continue
-
-                logger.info(f"[BiliBot] 新评论: {username}({mid}): {content}")
-
-                ai_reply = await self._generate_reply(content, mid, username)
-
-                if ai_reply:
-                    success = self._send_reply(oid, rpid, comment_type, ai_reply)
-                    if success:
-                        logger.info(f"[BiliBot] 回复成功: {username} <- {ai_reply[:50]}")
-                        count += 1
-                    else:
-                        logger.warning(f"[BiliBot] 回复发送失败: {username}")
-                else:
-                    logger.warning(f"[BiliBot] 生成回复失败，跳过: {username}")
-
-                # 不管成功失败都标记，防止重复处理
-                replied.add(rpid)
-
-            self._save_json(REPLIED_FILE, list(replied))
-
-        except Exception as e:
-            logger.error(f"[BiliBot] 轮询出错: {e}")
-
-    # ================================================================
-    #  LLM 回复生成
-    # ================================================================
-
-    def _get_system_prompt(self) -> str:
-        """获取系统提示词：AstrBot人设或自定义"""
-        if self.config.get("USE_ASTRBOT_PERSONA", True):
-            # 尝试获取 AstrBot 配置的人设
-            try:
-                personas = self.context.provider_manager.personas
-                if personas:
-                    # 用第一个人设
-                    return personas[0].prompt
-            except Exception:
-                pass
-        # 用自定义提示词
-        return self.config.get(
-            "CUSTOM_SYSTEM_PROMPT",
-            "你是一个B站UP主的AI助手，负责回复评论。回复要简短自然，像真人一样，不要太官方。",
-        )
-
-    async def _generate_reply(self, content: str, mid: str, username: str) -> str | None:
-        """生成回复：支持自定义API或AstrBot provider"""
+            resp = requests.get("https://api.bilibili.com/x/web-interface/view", headers=self._headers(), params={"aid":oid}, timeout=10)
+            d = resp.json()
+            if d["code"]==0: return d["data"].get("bvid","")
+        except: pass
+        return ""
+    def _get_video_info(self, oid):
         try:
-            system_prompt = self._get_system_prompt()
-            owner_name = self.config.get("OWNER_NAME", "") or "主人"
-            is_owner = str(mid) == str(self.config.get("OWNER_MID", ""))
-
-            prompt = (
-                f"B站用户「{username}」"
-                f"{'（这是' + owner_name + '）' if is_owner else ''}"
-                f"在你的视频下评论了：\n"
-                f"「{content}」\n\n"
-                f"请回复这条评论。要求：简短自然（50字以内），像真人而不是AI，"
-                f"不要用emoji过多，不要太官方。只输出回复内容，不要加引号或前缀。"
-            )
-
-            max_tokens = self.config.get("REPLY_MAX_TOKENS", 300)
-
-            if self.config.get("USE_CUSTOM_API", False):
-                return await self._call_custom_api(system_prompt, prompt, max_tokens)
-            else:
-                return await self._call_astrbot_provider(system_prompt, prompt)
-
-        except Exception as e:
-            logger.error(f"[BiliBot] LLM 回复生成失败: {e}\n{traceback.format_exc()}")
+            resp = requests.get("https://api.bilibili.com/x/web-interface/view", headers=self._headers(), params={"aid":oid}, timeout=10)
+            d = resp.json()
+            if d["code"]==0:
+                v=d["data"]; return {"bvid":v.get("bvid",""),"title":v.get("title",""),"desc":v.get("desc",""),"owner_name":v.get("owner",{}).get("name",""),"owner_mid":v.get("owner",{}).get("mid",""),"tname":v.get("tname","")}
+        except Exception as e: logger.error(f"[BiliBot] 获取视频信息失败：{e}")
         return None
+    def _get_video_context(self, oid, comment_type):
+        if comment_type!=1: return ""
+        vc = self._load_json(VIDEO_MEMORY_FILE, {})
+        bvid = self._oid_to_bvid(oid)
+        if not bvid: return ""
+        if bvid in vc:
+            c=vc[bvid]; return f"【当前视频】标题：{c['title']} | UP主：{c['owner_name']} | {c.get('analysis','')}"
+        vi = self._get_video_info(oid)
+        if not vi: return ""
+        analysis = f"视频《{vi['title']}》，UP主：{vi['owner_name']}，分区：{vi['tname']}。简介：{vi.get('desc','')[:200]}"
+        vc[bvid] = {"title":vi["title"],"desc":vi.get("desc","")[:200],"owner_name":vi["owner_name"],"owner_mid":vi["owner_mid"],"tname":vi["tname"],"analysis":analysis,"time":datetime.now().strftime("%Y-%m-%d %H:%M")}
+        self._save_json(VIDEO_MEMORY_FILE, vc)
+        return f"【当前视频】标题：{vi['title']} | UP主：{vi['owner_name']} | {analysis}"
 
-    async def _call_custom_api(self, system_prompt: str, prompt: str, max_tokens: int) -> str | None:
-        """通过自定义 OpenAI 兼容 API 生成回复"""
+    # ===== Cookie管理 =====
+    def check_cookie(self):
+        s = self.config.get("SESSDATA","")
+        if not s: return False,"SESSDATA 为空"
+        try:
+            resp = requests.get(BILI_NAV_URL, headers=self._headers(), timeout=10); d=resp.json()
+            if d["code"]==0: return True,f"✅ {d['data'].get('uname','?')} (UID:{d['data'].get('mid','')}) LV{d['data'].get('level_info',{}).get('current_level',0)}"
+            return False,f"❌ Cookie 已失效 (code:{d['code']})"
+        except Exception as e: return False,f"❌ 检查失败: {e}"
+    def check_need_refresh(self):
+        try:
+            resp = requests.get(BILI_COOKIE_INFO_URL, params={"csrf":self.config.get("BILI_JCT","")}, headers=self._headers(), timeout=10); d=resp.json()
+            if d["code"]!=0: return False,f"检查失败: {d.get('message','')}"
+            return (True,"需要刷新") if d["data"].get("refresh",False) else (False,"Cookie 仍然有效")
+        except Exception as e: return False,f"检查出错: {e}"
+    def _generate_correspond_path(self, ts):
+        from cryptography.hazmat.primitives.asymmetric import padding; from cryptography.hazmat.primitives import hashes, serialization
+        pk = serialization.load_pem_public_key(BILI_RSA_PUBLIC_KEY.encode())
+        return pk.encrypt(f"refresh_{ts}".encode(), padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),algorithm=hashes.SHA256(),label=None)).hex()
+    def refresh_cookie(self):
+        rt=self.config.get("REFRESH_TOKEN","")
+        if not rt: return False,"没有 REFRESH_TOKEN"
+        bjct=self.config.get("BILI_JCT","")
+        if not self.config.get("SESSDATA",""): return False,"SESSDATA 为空"
+        try:
+            need,msg = self.check_need_refresh()
+            if not need: return True,msg
+            cp = self._generate_correspond_path(int(time.time()*1000))
+            resp = requests.get(f"https://www.bilibili.com/correspond/1/{cp}", headers=self._headers(), timeout=10)
+            m = re.search(r'<div\s+id="1-name"\s*>([^<]+)</div>', resp.text)
+            if not m: return False,"无法提取 refresh_csrf"
+            resp = requests.post(BILI_COOKIE_REFRESH_URL, headers=self._headers(), data={"csrf":bjct,"refresh_csrf":m.group(1).strip(),"source":"main_web","refresh_token":rt}, timeout=10)
+            result=resp.json()
+            if result["code"]!=0: return False,f"刷新失败: {result.get('message',result['code'])}"
+            updates={}
+            nrt=result["data"].get("refresh_token","")
+            if nrt: updates["REFRESH_TOKEN"]=nrt
+            for c in resp.cookies:
+                if c.name=="SESSDATA": updates["SESSDATA"]=c.value
+                elif c.name=="bili_jct": updates["BILI_JCT"]=c.value
+                elif c.name=="DedeUserID": updates["DEDE_USER_ID"]=c.value
+            if "SESSDATA" not in updates: return False,"刷新响应中未找到新 SESSDATA"
+            try:
+                ch=dict(self._headers()); ch["Cookie"]=f"SESSDATA={updates['SESSDATA']}; bili_jct={updates.get('BILI_JCT',bjct)}"
+                requests.post(BILI_COOKIE_CONFIRM_URL, headers=ch, data={"csrf":updates.get("BILI_JCT",bjct),"refresh_token":rt}, timeout=10)
+            except: pass
+            for k,v in updates.items(): self.config[k]=v
+            self.config.save_config()
+            return True,f"✅ Cookie 刷新成功！"
+        except Exception as e: return False,f"刷新出错: {e}"
+
+    # ===== WBI签名 =====
+    def _get_wbi_keys(self):
+        resp=requests.get(BILI_NAV_URL,headers=self._headers(),timeout=10); d=resp.json()["data"]["wbi_img"]
+        return d["img_url"].rsplit("/",1)[1].split(".")[0], d["sub_url"].rsplit("/",1)[1].split(".")[0]
+    def _get_mixin_key(self, orig): return reduce(lambda s,i:s+orig[i], MIXIN_KEY_ENC_TAB, "")[:32]
+    def sign_wbi_params(self, params):
+        try:
+            ik,sk=self._get_wbi_keys(); mk=self._get_mixin_key(ik+sk); params["wts"]=int(time.time()); params=dict(sorted(params.items()))
+            params["w_rid"]=hashlib.md5(("&".join(f"{k}={v}" for k,v in params.items())+mk).encode()).hexdigest(); return params
+        except: return params
+
+    # ===== 扫码登录 =====
+    async def _qr_login_generate(self):
+        try:
+            resp=requests.get(BILI_QR_GENERATE_URL, headers={"User-Agent":USER_AGENT}, timeout=10); d=resp.json()
+            if d["code"]==0: return d["data"]["url"],d["data"]["qrcode_key"]
+        except Exception as e: logger.error(f"生成二维码失败: {e}")
+        return None,None
+    async def _qr_login_poll(self, qrcode_key):
+        try:
+            resp=requests.get(BILI_QR_POLL_URL, params={"qrcode_key":qrcode_key}, headers={"User-Agent":USER_AGENT}, timeout=10)
+            d=resp.json()["data"]; code=d["code"]
+            mm={0:"登录成功",86038:"二维码已失效",86090:"已扫码，请在手机上确认",86101:"等待扫码中..."}
+            cookies={}
+            if code==0:
+                url=d.get("url",""); rt=d.get("refresh_token","")
+                if url:
+                    from urllib.parse import urlparse,parse_qs; p=parse_qs(urlparse(url).query)
+                    cookies={"SESSDATA":p.get("SESSDATA",[""])[0],"bili_jct":p.get("bili_jct",[""])[0],"DedeUserID":p.get("DedeUserID",[""])[0],"REFRESH_TOKEN":rt}
+                for c in resp.cookies:
+                    if c.name in ("SESSDATA","bili_jct","DedeUserID"): cookies[c.name]=c.value
+            return code, mm.get(code,f"未知({code})"), cookies
+        except Exception as e: return -1,f"轮询失败: {e}",{}
+
+    # ===== LLM =====
+    async def _llm_call(self, prompt, system_prompt="", max_tokens=300):
+        try:
+            if self.config.get("USE_CUSTOM_API",False): return await self._call_custom_api(system_prompt or "你是一个AI助手。", prompt, max_tokens)
+            else: return await self._call_astrbot_provider(system_prompt or "你是一个AI助手。", prompt)
+        except Exception as e: logger.error(f"[BiliBot] LLM 调用失败: {e}"); return None
+    def _get_system_prompt(self):
+        if self.config.get("USE_ASTRBOT_PERSONA",True):
+            try:
+                ps = self.context.provider_manager.personas
+                if ps: return ps[0].prompt
+            except: pass
+        return self.config.get("CUSTOM_SYSTEM_PROMPT","你是一个B站UP主的AI助手。")
+    async def _generate_reply(self, content, mid, username, thread_id, oid, comment_type):
+        try:
+            sp = self._get_system_prompt(); on = self.config.get("OWNER_NAME","") or "主人"
+            is_owner = str(mid)==str(self.config.get("OWNER_MID",""))
+            cs = self._affection.get(str(mid),0); lv = self._get_level(cs, mid)
+            lp = self._get_level_prompts()[lv]
+            vc = self._get_video_context(oid, comment_type)
+            mc = self._build_memory_context(thread_id, mid, content, vc)
+            ms = f"\n\n【记忆参考】\n{mc}" if mc else ""
+            mood,mp = self._get_today_mood(); fest = self._get_festival_prompt()
+            fs = f"\n特殊日期：{fest}" if fest else ""
+            now = datetime.now().strftime("%Y-%m-%d %H:%M")
+            prompt = f"""{lp}\n\n【底线】拒绝：表白暧昧、引战、黄赌毒政治。\n\n【今日状态】{mood} — {mp}{fs}\n\n当前时间：{now}{ms}\n\n「{username}」{'（这是'+on+'）' if is_owner else ''}的评论：「{content}」\n\n请以JSON格式回复：\n{{"score_delta": 数字, "reply": "回复内容", "impression": "印象", "user_facts": ["个人信息"], "permanent_memory": "永久记忆(没有则留空)"}}\n\nscore_delta：友善+2，普通+1，不友善-2，辱骂-5。reply不超过50字。"""
+            mt = self.config.get("REPLY_MAX_TOKENS",300)
+            if self.config.get("USE_CUSTOM_API",False): rt = await self._call_custom_api(sp, prompt, mt)
+            else: rt = await self._call_astrbot_provider(sp, prompt)
+            if not rt: return None
+            rt = rt.replace("```json","").replace("```","").strip()
+            try: r = json.loads(rt)
+            except:
+                m = re.search(r'\{.*\}', rt, re.DOTALL)
+                r = json.loads(m.group()) if m else {"score_delta":1,"reply":rt[:50],"impression":"","user_facts":[],"permanent_memory":""}
+            return {"score_delta":r.get("score_delta",1),"reply":r.get("reply",""),"impression":r.get("impression",""),"user_facts":r.get("user_facts",[]),"permanent_memory":r.get("permanent_memory","")}
+        except Exception as e: logger.error(f"[BiliBot] 回复生成失败: {e}\n{traceback.format_exc()}"); return None
+    async def _call_custom_api(self, system_prompt, prompt, max_tokens):
         from openai import AsyncOpenAI
-
-        base_url = self.config.get("API_BASE_URL", "")
-        api_key = self.config.get("API_KEY", "")
-        model = self.config.get("API_MODEL", "")
-
-        if not all([base_url, api_key, model]):
-            logger.error("[BiliBot] 自定义API配置不完整，请填写 API_BASE_URL、API_KEY、API_MODEL")
-            return None
-
-        client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-        resp = await client.chat.completions.create(
-            model=model,
-            max_tokens=max_tokens,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-            ],
-        )
-
-        if resp.choices and resp.choices[0].message.content:
-            reply = resp.choices[0].message.content.strip().strip('"').strip("'")
-            return reply if reply else None
-        return None
-
-    async def _call_astrbot_provider(self, system_prompt: str, prompt: str) -> str | None:
-        """通过 AstrBot 内置 LLM provider 生成回复"""
+        bu,ak,md = self.config.get("API_BASE_URL",""),self.config.get("API_KEY",""),self.config.get("API_MODEL","")
+        if not all([bu,ak,md]): return None
+        c = AsyncOpenAI(api_key=ak, base_url=bu)
+        resp = await c.chat.completions.create(model=md, max_tokens=max_tokens, messages=[{"role":"system","content":system_prompt},{"role":"user","content":prompt}])
+        return resp.choices[0].message.content.strip() if resp.choices and resp.choices[0].message.content else None
+    async def _call_astrbot_provider(self, system_prompt, prompt):
         provider = self.context.get_using_provider()
-        if not provider:
-            logger.error("[BiliBot] 没有可用的 LLM provider")
-            return None
-
-        resp = await provider.text_chat(
-            prompt=prompt,
-            session_id=f"bili_reply",
-            contexts=[],
-            system_prompt=system_prompt,
-        )
-
+        if not provider: logger.error("[BiliBot] 没有可用的 LLM provider"); return None
+        resp = await provider.text_chat(prompt=prompt, session_id="bili_reply", contexts=[], system_prompt=system_prompt)
         if resp:
-            reply_text = None
-            if hasattr(resp, 'completion_text') and resp.completion_text:
-                reply_text = resp.completion_text
-            elif hasattr(resp, 'result_chain') and resp.result_chain:
+            if hasattr(resp,'completion_text') and resp.completion_text: return resp.completion_text.strip()
+            elif hasattr(resp,'result_chain') and resp.result_chain:
                 for comp in resp.result_chain.chain:
-                    if hasattr(comp, 'text') and comp.text:
-                        reply_text = comp.text
-                        break
-            if reply_text:
-                reply = reply_text.strip().strip('"').strip("'")
-                return reply if reply else None
+                    if hasattr(comp,'text') and comp.text: return comp.text.strip()
         return None
 
-    # ================================================================
-    #  B站 API 基础操作（后续填充）
-    # ================================================================
-
-    def _send_reply(self, oid: int, rpid: str, reply_type: int, content: str) -> bool:
-        """发送评论回复"""
+    # ===== B站API =====
+    def _send_reply(self, oid, rpid, reply_type, content):
         try:
-            resp = requests.post(
-                BILI_REPLY_URL,
-                headers=self._headers(),
-                data={
-                    "oid": oid,
-                    "type": reply_type,
-                    "root": rpid,
-                    "parent": rpid,
-                    "message": content,
-                    "csrf": self.config.get("BILI_JCT", ""),
-                },
-                timeout=10,
-            )
-            logger.debug(f"[BiliBot] 回复API响应: status={resp.status_code}, body={resp.text[:200]}")
-            data = resp.json()
-            if data["code"] == 0:
-                logger.info(f"[BiliBot] 回复成功: {content[:30]}...")
-                return True
-            elif data["code"] == -101:
-                logger.error("[BiliBot] SESSDATA 失效！请重新登录")
-                return False
-            elif data["code"] == -111:
-                logger.error("[BiliBot] bili_jct 错误！请检查 Cookie")
-                return False
-            else:
-                logger.warning(f"[BiliBot] 回复失败: {data.get('message', data['code'])}")
-                return False
-        except Exception as e:
-            logger.error(f"[BiliBot] 回复出错: {e}")
+            resp = requests.post(BILI_REPLY_URL, headers=self._headers(), data={"oid":oid,"type":reply_type,"root":rpid,"parent":rpid,"message":content,"csrf":self.config.get("BILI_JCT","")}, timeout=10)
+            d=resp.json()
+            if d["code"]==0: return True
+            elif d["code"]==-101: logger.error("[BiliBot] SESSDATA 失效！")
+            elif d["code"]==-111: logger.error("[BiliBot] bili_jct 错误！")
+            else: logger.warning(f"[BiliBot] 回复失败: {d.get('message',d['code'])}")
             return False
-
-    def get_followings(self, mid: str = None) -> list:
-        """获取关注列表，默认用Bot自己的"""
-        target = mid or self.config.get("DEDE_USER_ID", "")
+        except Exception as e: logger.error(f"[BiliBot] 回复出错: {e}"); return False
+    def get_followings(self, mid=None):
+        target = mid or self.config.get("DEDE_USER_ID","")
         try:
-            resp = requests.get(
-                "https://api.bilibili.com/x/relation/followings",
-                headers=self._headers(),
-                params={"vmid": target, "ps": 50, "pn": 1},
-                timeout=10,
-            )
-            data = resp.json()
-            if data["code"] == 0:
-                return [item["mid"] for item in data.get("data", {}).get("list", [])]
-        except Exception as e:
-            logger.error(f"[BiliBot] 获取关注列表失败: {e}")
+            resp = requests.get("https://api.bilibili.com/x/relation/followings", headers=self._headers(), params={"vmid":target,"ps":50,"pn":1}, timeout=10)
+            d=resp.json()
+            if d["code"]==0: return [i["mid"] for i in d.get("data",{}).get("list",[])]
+        except Exception as e: logger.error(f"[BiliBot] 获取关注列表失败: {e}")
         return []
 
-    # ================================================================
-    #  生命周期
-    # ================================================================
+    # ===== QQ命令 =====
+    @filter.command("bili登录")
+    async def cmd_login(self, event: AstrMessageEvent):
+        qr_url, qrcode_key = await self._qr_login_generate()
+        if not qr_url: yield event.plain_result("❌ 生成二维码失败"); return
+        self._login_qrcode_key = qrcode_key
+        import qrcode; qr=qrcode.QRCode(version=1,box_size=8,border=2); qr.add_data(qr_url); qr.make(fit=True)
+        img=qr.make_image(fill_color="black",back_color="white"); buf=io.BytesIO(); img.save(buf,format="PNG"); buf.seek(0)
+        qr_path=os.path.join(DATA_DIR,"login_qr.png")
+        with open(qr_path,"wb") as f: f.write(buf.getvalue())
+        yield event.chain_result([Plain("📱 请用B站APP扫描下方二维码：\n扫码后发送 /bili确认"), Image.fromFileSystem(qr_path)])
+    @filter.command("bili确认")
+    async def cmd_login_confirm(self, event: AstrMessageEvent):
+        if not self._login_qrcode_key: yield event.plain_result("❌ 没有待确认的登录"); return
+        for i in range(3):
+            code,msg,cookies = await self._qr_login_poll(self._login_qrcode_key)
+            if code==0:
+                for k,ck in [("SESSDATA","SESSDATA"),("BILI_JCT","bili_jct"),("DEDE_USER_ID","DedeUserID"),("REFRESH_TOKEN","REFRESH_TOKEN")]:
+                    if cookies.get(ck): self.config[k]=cookies[ck]
+                self.config.save_config(); self._login_qrcode_key=None
+                valid,info=self.check_cookie(); yield event.plain_result(f"✅ 登录成功！\n{info}")
+                if not self._running: await self._start_bot(); yield event.plain_result("🚀 后台任务已自动启动")
+                return
+            elif code==86090: yield event.plain_result(f"📱 {msg}"); await asyncio.sleep(2)
+            elif code==86101: yield event.plain_result(f"⏳ {msg}"); await asyncio.sleep(3)
+            elif code==86038: self._login_qrcode_key=None; yield event.plain_result(f"❌ {msg}，请重新 /bili登录"); return
+            else: yield event.plain_result(f"❌ {msg}"); return
+        yield event.plain_result("⏳ 还没确认成功，请在手机上确认后再发 /bili确认")
+    @filter.command("bili状态")
+    async def cmd_status(self, event: AstrMessageEvent):
+        valid,info=self.check_cookie(); mood,_=self._get_today_mood()
+        mc=len(self._memory); pc=len(self._load_json(USER_PROFILE_FILE,{})); pmc=len(self._load_json(PERMANENT_MEMORY_FILE,[]))
+        lines = [f"📺 BiliBot 状态","━━━━━━━━━━━━",f"🍪 {info}",f"{'🟢 运行中' if self._running else '🔴 未运行'}",f"🧠 记忆:{mc}条 | 💎永久:{pmc}条 | 👤档案:{pc}个",f"🎭 心情:{mood}",f"回复:{'✅' if self.config.get('ENABLE_REPLY',True) else '❌'} 好感:{'✅' if self.config.get('ENABLE_AFFECTION',True) else '❌'} 心情:{'✅' if self.config.get('ENABLE_MOOD',True) else '❌'}"]
+        yield event.plain_result("\n".join(lines))
+    @filter.command("bili启动")
+    async def cmd_start(self, event: AstrMessageEvent):
+        if self._running: yield event.plain_result("⚠️ 已在运行"); return
+        if not self._has_cookie(): yield event.plain_result("❌ 请先 /bili登录"); return
+        await self._start_bot(); yield event.plain_result("🚀 已启动！")
+    @filter.command("bili停止")
+    async def cmd_stop(self, event: AstrMessageEvent):
+        if not self._running: yield event.plain_result("⚠️ 没在运行"); return
+        await self._stop_bot(); yield event.plain_result("⏹️ 已停止")
+    @filter.command("bili开关")
+    async def cmd_toggle(self, event: AstrMessageEvent):
+        parts = event.message_str.strip().split(maxsplit=1)
+        if len(parts)<2:
+            tm = {"回复":"ENABLE_REPLY","主动":"ENABLE_PROACTIVE","动态":"ENABLE_DYNAMIC","好感":"ENABLE_AFFECTION","心情":"ENABLE_MOOD","点赞":"PROACTIVE_LIKE","投币":"PROACTIVE_COIN","收藏":"PROACTIVE_FAV","关注":"PROACTIVE_FOLLOW","评论":"PROACTIVE_COMMENT"}
+            lines = ["可切换功能："] + [f"  {n} ({'✅' if self.config.get(k,True) else '❌'})" for n,k in tm.items()] + ["","用法: /bili开关 回复"]
+            yield event.plain_result("\n".join(lines)); return
+        name=parts[1].strip()
+        tm = {"回复":"ENABLE_REPLY","主动":"ENABLE_PROACTIVE","动态":"ENABLE_DYNAMIC","好感":"ENABLE_AFFECTION","心情":"ENABLE_MOOD","点赞":"PROACTIVE_LIKE","投币":"PROACTIVE_COIN","收藏":"PROACTIVE_FAV","关注":"PROACTIVE_FOLLOW","评论":"PROACTIVE_COMMENT"}
+        key=tm.get(name)
+        if not key: yield event.plain_result(f"❌ 不认识：{name}"); return
+        cur=self.config.get(key,True); self.config[key]=not cur; self.config.save_config()
+        yield event.plain_result(f"{name}: {'✅ 已开启' if not cur else '❌ 已关闭'}")
+    @filter.command("bili刷新")
+    async def cmd_refresh_cookie(self, event: AstrMessageEvent):
+        yield event.plain_result("🔄 刷新中..."); _,msg=self.refresh_cookie(); yield event.plain_result(msg)
+    @filter.command("bili记忆")
+    async def cmd_memory(self, event: AstrMessageEvent):
+        parts = event.message_str.strip().split(maxsplit=2)
+        if len(parts)<2:
+            mc=len(self._memory); bc=len([m for m in self._memory if m.get("source")=="bilibili"]); qc=len([m for m in self._memory if m.get("source")=="qq"])
+            yield event.plain_result(f"🧠 记忆统计\n总计:{mc} | B站:{bc} | QQ:{qc}\n\n用法: /bili记忆 <关键词>\n/bili记忆 关键词 qq ← 只搜QQ"); return
+        query=parts[1]; source=parts[2] if len(parts)>2 else None
+        if source=="all": source=None
+        results = self._search_memories(query, limit=5, source=source)
+        if not results: yield event.plain_result(f"🧠 没找到「{query}」的记忆"); return
+        lines = [f"🧠 关于「{query}」的记忆：",""]
+        for i,r in enumerate(results,1): lines.append(f"{i}. {r[:150]+'...' if len(r)>150 else r}")
+        yield event.plain_result("\n".join(lines))
+    @filter.command("bili好感")
+    async def cmd_affection(self, event: AstrMessageEvent):
+        parts = event.message_str.strip().split(maxsplit=1)
+        if len(parts)>=2:
+            uid=parts[1].strip(); sc=self._affection.get(uid,0); lv=self._get_level(sc,uid)
+            p=self._load_json(USER_PROFILE_FILE,{}).get(uid,{})
+            lines=[f"👤 用户 {uid}",f"💛 {sc}分 | {LEVEL_NAMES[lv]}",f"📝 {p.get('impression','暂无')}"]
+            if p.get("facts"): lines.append(f"📋 {'；'.join(p['facts'][-5:])}")
+            yield event.plain_result("\n".join(lines)); return
+        if not self._affection: yield event.plain_result("💛 无记录"); return
+        sa=sorted(self._affection.items(),key=lambda x:x[1],reverse=True)[:10]
+        lines=["💛 好感度 Top 10","━━━━━━━━━━━━"]
+        ps=self._load_json(USER_PROFILE_FILE,{})
+        for i,(uid,sc) in enumerate(sa,1):
+            lv=self._get_level(sc,uid); imp=ps.get(uid,{}).get("impression","")
+            lines.append(f"{i}. UID:{uid} | {sc}分 {LEVEL_NAMES[lv]}{' — '+imp[:20] if imp else ''}")
+        yield event.plain_result("\n".join(lines))
+    @filter.command("bili帮助")
+    async def cmd_help(self, event: AstrMessageEvent):
+        yield event.plain_result("📺 BiliBot 命令\n━━━━━━━━━━━━\n/bili登录 — 扫码登录\n/bili确认 — 确认扫码\n/bili状态 — 运行状态\n/bili启动 — 启动\n/bili停止 — 停止\n/bili开关 — 功能开关\n/bili刷新 — 刷新Cookie\n/bili记忆 — 搜索记忆\n/bili好感 — 好感度\n/bili帮助 — 本帮助\n━━━━━━━━━━━━\n💡 首次用 /bili登录")
+
+    # ===== 后台任务 =====
+    async def _auto_start(self):
+        await asyncio.sleep(3)
+        valid,_=self.check_cookie()
+        if valid: await self._start_bot(); logger.info("[BiliBot] 自动启动")
+        else: logger.warning("[BiliBot] Cookie无效")
+    async def _start_bot(self):
+        if self._running: return
+        self._running=True; self._task=asyncio.create_task(self._main_loop()); logger.info("[BiliBot] 启动")
+    async def _stop_bot(self):
+        self._running=False
+        if self._task: self._task.cancel(); self._task=None
+        logger.info("[BiliBot] 停止")
+    async def _main_loop(self):
+        logger.info("[BiliBot] 主循环开始")
+        while self._running:
+            try:
+                h=datetime.now().hour; ss=self.config.get("SLEEP_START",2); se=self.config.get("SLEEP_END",8)
+                if ss<=h<se: await asyncio.sleep(60); continue
+                ci=self.config.get("COOKIE_CHECK_INTERVAL",6)*3600
+                if time.time()-self._last_cookie_check>ci: await self._check_and_refresh_cookie(); self._last_cookie_check=time.time()
+                if self.config.get("ENABLE_REPLY",True): await self._poll_and_reply()
+                await asyncio.sleep(self.config.get("POLL_INTERVAL",20))
+            except asyncio.CancelledError: break
+            except Exception as e: logger.error(f"[BiliBot] 主循环出错: {e}\n{traceback.format_exc()}"); await asyncio.sleep(30)
+        self._running=False
+    async def _check_and_refresh_cookie(self):
+        valid,info=self.check_cookie()
+        if valid: logger.info(f"[BiliBot] Cookie OK: {info}"); return
+        logger.warning(f"[BiliBot] Cookie 失效: {info}")
+        if self.config.get("COOKIE_AUTO_REFRESH",True):
+            ok,msg=self.refresh_cookie(); logger.info(f"[BiliBot] 刷新{'成功' if ok else '失败'}: {msg}")
+    async def _poll_and_reply(self):
+        if time.time() < self._llm_cooldown_until:
+            return  # LLM冷却中，跳过
+        try:
+            resp=requests.get(BILI_NOTIFY_URL, headers=self._headers(), params={"ps":10,"pn":1}, timeout=10); d=resp.json()
+            if d["code"]!=0: return
+            items=d.get("data",{}).get("items",[])
+            if not items: return
+            replied=set(self._load_json(REPLIED_FILE,[]))
+            if self._first_poll:
+                for item in items:
+                    rpid=str(item.get("item",{}).get("source_id",""))
+                    if rpid: replied.add(rpid)
+                self._save_json(REPLIED_FILE,list(replied)); self._first_poll=False
+                logger.info(f"[BiliBot] 首次运行，标记 {len(items)} 条已读"); return
+            count=0; mr=self.config.get("MAX_REPLIES_PER_RUN",3)
+            for item in items:
+                if count>=mr: break
+                r=item.get("item",{}); rpid=str(r.get("source_id",""))
+                if rpid in replied: continue
+                mid=str(item.get("user",{}).get("mid","")); username=item.get("user",{}).get("nickname","")
+                content=r.get("source_content",""); oid=r.get("subject_id",0); ct=r.get("business_id",1)
+                thread_id=str(r.get("root_id") or rpid)
+                if not content or not rpid: continue
+                if self._is_blocked(content):
+                    self._log_security_event("keyword_blocked",mid,username,content,"关键词过滤")
+                    replied.add(rpid); self._save_json(REPLIED_FILE,list(replied)); continue
+                cs=self._affection.get(str(mid),0); lv=self._get_level(cs,mid)
+                logger.info(f"[BiliBot] 📩 {username}（{LEVEL_NAMES[lv]}|{cs}分）：{content[:50]}")
+                result = await self._generate_reply(content, mid, username, thread_id, oid, ct)
+                if not result or not result.get("reply"):
+                    self._retry_counts[rpid] = self._retry_counts.get(rpid, 0) + 1
+                    self._consecutive_llm_failures += 1
+                    if self._retry_counts[rpid] >= 3:
+                        logger.warning(f"[BiliBot] {username} 重试3次仍失败，放弃")
+                        replied.add(rpid); self._save_json(REPLIED_FILE,list(replied))
+                        self._retry_counts.pop(rpid, None)
+                    else:
+                        logger.warning(f"[BiliBot] {username} 第{self._retry_counts[rpid]}次失败，下轮重试")
+                    if self._consecutive_llm_failures >= 5:
+                        self._llm_cooldown_until = time.time() + 300
+                        logger.error("[BiliBot] ⚠️ 连续5次LLM失败，冷却5分钟")
+                        break
+                    continue
+                self._consecutive_llm_failures = 0  # LLM活着，全局计数归零
+                self._retry_counts.pop(rpid, None)
+                ai_reply=result["reply"]; sd=result.get("score_delta",1)
+                imp=result.get("impression",""); uf=result.get("user_facts",[]); pm=result.get("permanent_memory","")
+                if self.config.get("ENABLE_AFFECTION",True):
+                    mx=100 if str(mid)==str(self.config.get("OWNER_MID","")) else 99
+                    ns=max(0,min(mx,cs+sd)); self._affection[str(mid)]=ns; self._save_json(AFFECTION_FILE,self._affection)
+                    ds=f"+{sd}" if sd>=0 else str(sd)
+                    logger.info(f"[BiliBot] 💛 {cs}→{ns}（{ds}）| {LEVEL_NAMES[self._get_level(ns,mid)]}")
+                    mm=self._check_milestone(mid,cs,ns,username)
+                    if mm: ai_reply=mm
+                    should_block=False
+                    if ns<=-30: should_block=True
+                    if sd<=-3:
+                        bc=self._load_json(os.path.join(DATA_DIR,"block_count.json"),{}); bc[mid]=bc.get(mid,0)+1
+                        self._save_json(os.path.join(DATA_DIR,"block_count.json"),bc)
+                        if bc[mid]>=5: should_block=True
+                        self._log_security_event("negative",mid,username,content,f"{cs}→{ns}({ds})")
+                    else:
+                        bc=self._load_json(os.path.join(DATA_DIR,"block_count.json"),{})
+                        if mid in bc: bc[mid]=0; self._save_json(os.path.join(DATA_DIR,"block_count.json"),bc)
+                    if should_block and str(mid)!=str(self.config.get("OWNER_MID","")):
+                        self._send_reply(oid,rpid,ct,"我不想和你说话了。"); self._block_user(int(mid))
+                        logger.info(f"[BiliBot] 🚫 拉黑 {username}"); replied.add(rpid); self._save_json(REPLIED_FILE,list(replied)); continue
+                if imp or uf: self._update_user_profile(mid, impression=imp or None, new_facts=uf or None)
+                if pm:
+                    perm=self._load_json(PERMANENT_MEMORY_FILE,[])
+                    if len(perm)<20: perm.append({"text":pm,"time":datetime.now().strftime("%Y-%m-%d %H:%M")}); self._save_json(PERMANENT_MEMORY_FILE,perm)
+                logger.info(f"[BiliBot] 💬 {username}: {ai_reply[:50]}")
+                success=self._send_reply(oid,rpid,ct,ai_reply)
+                if success:
+                    self._save_memory_record(rpid,thread_id,mid,username,content,ai_reply); count+=1
+                    await self._compress_user_memory(mid,username)
+                replied.add(rpid); self._save_json(REPLIED_FILE,list(replied))
+        except Exception as e: logger.error(f"[BiliBot] 轮询出错: {e}\n{traceback.format_exc()}")
 
     async def terminate(self):
-        """插件卸载/停用时调用"""
-        await self._stop_bot()
-        logger.info("[BiliBot] 插件已停用")
+        await self._stop_bot(); logger.info("[BiliBot] 已停用")
