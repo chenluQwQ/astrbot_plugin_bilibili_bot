@@ -437,10 +437,23 @@ class BiliBiliBot(Star):
             rt = await self._llm_call(prompt, system_prompt=sp)
             if not rt: return None
             rt = rt.replace("```json","").replace("```","").strip()
+            r = None
+            # 尝试直接解析
             try: r = json.loads(rt)
-            except:
+            except: pass
+            # 尝试正则提取 JSON
+            if r is None:
                 m = re.search(r'\{.*\}', rt, re.DOTALL)
-                r = json.loads(m.group()) if m else {"score_delta":1,"reply":rt[:50],"impression":"","user_facts":[],"permanent_memory":""}
+                if m:
+                    try: r = json.loads(m.group())
+                    except: pass
+            # 终极兜底：把原文当回复
+            if r is None or not isinstance(r, dict):
+                # 尝试提取 reply 字段
+                rm = re.search(r'"reply"\s*:\s*"([^"]*)"', rt)
+                reply_text = rm.group(1) if rm else rt[:50]
+                r = {"score_delta":1,"reply":reply_text,"impression":"","user_facts":[],"permanent_memory":""}
+                logger.warning(f"[BiliBot] JSON解析失败，使用兜底回复: {reply_text[:30]}")
             return {"score_delta":r.get("score_delta",1),"reply":r.get("reply",""),"impression":r.get("impression",""),"user_facts":r.get("user_facts",[]),"permanent_memory":r.get("permanent_memory","")}
         except Exception as e: logger.error(f"[BiliBot] 回复生成失败: {e}\n{traceback.format_exc()}"); return None
 
