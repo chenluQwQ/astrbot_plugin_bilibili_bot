@@ -293,7 +293,8 @@ class BiliBiliBot(Star):
     async def _qr_login_generate(self) -> tuple[str | None, str | None]:
         """生成登录二维码，返回 (qr_url, qrcode_key)"""
         try:
-            resp = requests.get(BILI_QR_GENERATE_URL, timeout=10)
+            resp = requests.get(BILI_QR_GENERATE_URL, headers={"User-Agent": USER_AGENT}, timeout=10)
+            logger.debug(f"[BiliBot] 二维码API响应: status={resp.status_code}, body={resp.text[:200]}")
             data = resp.json()
             if data["code"] == 0:
                 return data["data"]["url"], data["data"]["qrcode_key"]
@@ -307,6 +308,7 @@ class BiliBiliBot(Star):
             resp = requests.get(
                 BILI_QR_POLL_URL,
                 params={"qrcode_key": qrcode_key},
+                headers={"User-Agent": USER_AGENT},
                 timeout=10,
             )
             data = resp.json()["data"]
