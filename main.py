@@ -26,6 +26,11 @@ SECURITY_LOG_FILE = os.path.join(DATA_DIR, "security_log.json")
 VIDEO_MEMORY_FILE = os.path.join(DATA_DIR, "video_memory.json")
 BINDING_FILE = os.path.join(DATA_DIR, "qq_bili_bindings.json")
 QQ_MEMORY_FILE = os.path.join(DATA_DIR, "qq_memory.json")
+PERSONALITY_FILE = os.path.join(DATA_DIR, "personality_evolution.json")
+PROACTIVE_LOG_FILE = os.path.join(DATA_DIR, "proactive_log.json")
+EXTERNAL_MEMORY_FILE = os.path.join(DATA_DIR, "external_memory.json")
+COMMENTED_FILE = os.path.join(DATA_DIR, "commented_videos.json")
+WATCH_LOG_FILE = os.path.join(DATA_DIR, "watch_log.json")
 
 BILI_MENTION_KEYWORDS = ["b站", "B站", "阿b", "阿B", "啊b", "啊B", "bil", "bili", "bilibili", "小破站", "哔哩哔哩"]
 
@@ -55,7 +60,7 @@ MAX_SEMANTIC_RESULTS = 3
 USER_MEMORY_COMPRESS_THRESHOLD = 20
 USER_MEMORY_KEEP_RECENT = 5
 
-@register("astrbot_plugin_bilibili_bot","chenluQwQ","B站 AI Bot — 自动回复评论、好感度、记忆、心情、用户画像","0.2.0","https://github.com/chenluQwQ/astrbot_plugin_bilibili_bot")
+@register("astrbot_plugin_bilibili_bot","chenluQwQ","B站 AI Bot — 自动回复评论、好感度、记忆、心情、用户画像、主动视频、性格演化","0.3.0","https://github.com/chenluQwQ/astrbot_plugin_bilibili_bot")
 class BiliBiliBot(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -63,15 +68,19 @@ class BiliBiliBot(Star):
         self._ensure_data_dir()
         self._running = False
         self._task = None
+        self._proactive_task = None
         self._last_cookie_check = 0
         self._login_qrcode_key = None
         self._first_poll = not os.path.exists(REPLIED_FILE)
         self._affection = self._load_json(AFFECTION_FILE, {})
         self._memory = self._load_json(MEMORY_FILE, [])
         self._embed_client = None
-        self._consecutive_llm_failures = 0  # 全局连续失败，达5次冷却
-        self._llm_cooldown_until = 0  # 冷却截止时间戳
-        self._retry_counts: dict = {}  # {rpid: 已失败次数}，单条最多重试3次
+        self._video_vision_client = None
+        self._image_vision_client = None
+        self._consecutive_llm_failures = 0
+        self._llm_cooldown_until = 0
+        self._retry_counts: dict = {}
+        self._proactive_times, self._proactive_triggered = [], set()
         if self._has_cookie():
             asyncio.create_task(self._auto_start())
 
@@ -127,6 +136,69 @@ class BiliBiliBot(Star):
         na = math.sqrt(sum(x*x for x in a)); nb = math.sqrt(sum(x*x for x in b))
         return dot/(na*nb) if na and nb else 0
 
+    # ===== 视觉模型 =====
+    def _get_video_vision_client(self):
+        if self._video_vision_client is None:
+            api_key = self.config.get("VIDEO_VISION_API_KEY","")
+            if not api_key: return None
+            from openai import OpenAI
+            base_url = self.config.get("VIDEO_VISION_API_BASE","https://api.siliconflow.cn/v1")
+            self._video_vision_client = OpenAI(api_key=api_key, base_url=base_url)
+        return self._video_vision_client
+    def _get_image_vision_client(self):
+        if self._image_vision_client is None:
+            api_key = self.config.get("IMAGE_VISION_API_KEY","")
+            if not api_key: return None
+            from openai import OpenAI
+            base_url = self.config.get("IMAGE_VISION_API_BASE","https://api.siliconflow.cn/v1")
+            self._image_vision_client = OpenAI(api_key=api_key, base_url=base_url)
+        return self._image_vision_client
+    def _vision_call(self, client, model, content_parts, max_tokens=250):
+        """通用视觉模型调用"""
+        try:
+            resp = client.chat.completions.create(model=model, messages=[{"role":"user","content":content_parts}], max_tokens=max_tokens)
+            return resp.choices[0].message.content.strip() if resp.choices else None
+        except Exception as e:
+            logger.error(f"[BiliBot] 视觉模型调用失败: {e}"); return None
+    async def _fetch_image_base64(self, url):
+        """下载图片并转base64"""
+        try:
+            if not url.startswith("http"): url = "https:" + url
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url, headers={"Referer":"https://www.bilibili.com"}, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    if r.status == 200:
+                        data = await r.read()
+                        return base64.b64encode(data).decode()
+        except Exception as e: logger.error(f"[BiliBot] 图片下载失败: {e}")
+        return None
+    async def _get_comment_images(self, oid, rpid, comment_type):
+        """获取评论中的图片URL列表"""
+        try:
+            d, _ = await self._http_get("https://api.bilibili.com/x/v2/reply/detail", params={"oid":oid,"type":comment_type,"root":rpid})
+            if d["code"] != 0: return []
+            content = d.get("data",{}).get("root",{}).get("content",{})
+            pictures = content.get("pictures",[])
+            return [p["img_src"] for p in pictures if "img_src" in p]
+        except: return []
+    async def _recognize_images(self, image_urls):
+        """用视觉模型识别评论中的图片"""
+        if not image_urls: return ""
+        client = self._get_image_vision_client()
+        model = self.config.get("IMAGE_VISION_MODEL","")
+        if not client or not model: return ""
+        try:
+            content = []
+            for url in image_urls[:3]:
+                b64 = await self._fetch_image_base64(url)
+                if b64:
+                    content.append({"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}})
+            if not content: return ""
+            content.append({"type":"text","text":"请用50字以内描述这些图片的内容。"})
+            result = self._vision_call(client, model, content, max_tokens=100)
+            return result or ""
+        except Exception as e:
+            logger.error(f"[BiliBot] 图片识别失败: {e}"); return ""
+
     # ===== 好感度 =====
     def _get_level(self, score, mid=None):
         if str(mid)==str(self.config.get("OWNER_MID","")): return "special"
@@ -171,15 +243,18 @@ class BiliBiliBot(Star):
         profiles = self._load_json(USER_PROFILE_FILE, {})
         p = profiles.get(str(mid))
         if not p: return ""
-        parts = []
-        if p.get("impression"): parts.append(f"印象：{p['impression']}")
-        if p.get("facts"): parts.append("已知信息：" + "；".join(p["facts"][-10:]))
-        if p.get("tags"): parts.append("标签：" + "、".join(p["tags"]))
-        return "【对该用户的了解】\n" + "\n".join(parts) if parts else ""
-    def _update_user_profile(self, mid, impression=None, new_facts=None, new_tags=None):
+        entries = []
+        if p.get("username"): entries.append(f"昵称：{p['username']}")
+        if p.get("facts"):
+            for f in p["facts"][-10:]: entries.append(f)
+        if p.get("tags"): entries.append("标签：" + "、".join(p["tags"]))
+        if p.get("impression"): entries.append(f"印象：{p['impression']}")
+        return "【对该用户的了解】\n" + "\n".join(entries) if entries else ""
+    def _update_user_profile(self, mid, username=None, impression=None, new_facts=None, new_tags=None):
         profiles = self._load_json(USER_PROFILE_FILE, {})
         uid = str(mid)
-        if uid not in profiles: profiles[uid] = {"impression":"","facts":[],"tags":[]}
+        if uid not in profiles: profiles[uid] = {"username":"","impression":"","facts":[],"tags":[]}
+        if username and not profiles[uid].get("username"): profiles[uid]["username"] = username
         if impression: profiles[uid]["impression"] = impression
         if new_facts:
             ex = profiles[uid].get("facts",[])
@@ -215,6 +290,117 @@ class BiliBiliBot(Star):
         fests = {"01-01":"今天是元旦！语气温暖。","02-14":"今天是情人节。","04-01":"今天是愚人节！可以开小玩笑。","05-01":"今天是劳动节。","10-31":"今天是万圣节，语气神秘。","12-25":"今天是圣诞节，语气温柔。","12-31":"今天是跨年夜。"}
         lfests = {"01-01":"今天是春节！热情说新年快乐。","01-15":"今天是元宵节。","05-05":"今天是端午节。","08-15":"今天是中秋节。"}
         return fests.get(today,"") or lfests.get(lunar_md,"")
+
+    # ===== 性格演化系统 =====
+    def _get_personality_prompt(self):
+        evo = self._load_json(PERSONALITY_FILE, {})
+        if not evo: return ""
+        parts = []
+        traits = evo.get("evolved_traits", [])
+        if traits:
+            parts.append("【最近的成长变化】")
+            for t in traits[-3:]: parts.append(f"- {t['change']}")
+        habits = evo.get("speech_habits", [])
+        if habits: parts.append("【当前说话习惯】" + "；".join(habits))
+        opinions = evo.get("opinions", [])
+        if opinions: parts.append("【对事物的看法】" + "；".join(opinions))
+        return "\n".join(parts) if parts else ""
+
+    @staticmethod
+    def _parse_evolve_json(raw_text, old_habits, old_opinions):
+        text = raw_text.replace("```json","").replace("```","").strip()
+        try: return json.loads(text)
+        except: pass
+        m = re.search(r'\{.*\}', text, re.DOTALL)
+        if m:
+            try: return json.loads(m.group())
+            except: pass
+        json_start = text.find('{')
+        if json_start != -1:
+            fragment = text[json_start:]
+            ob = fragment.count('{') - fragment.count('}')
+            oq = fragment.count('[') - fragment.count(']')
+            fragment = re.sub(r',?\s*"[^"]*$', '', fragment)
+            fragment = re.sub(r',\s*$', '', fragment)
+            fragment += ']' * max(0, oq) + '}' * max(0, ob)
+            try: return json.loads(fragment)
+            except: pass
+        logger.warning(f"[BiliBot] 性格演化JSON解析失败：{raw_text[:200]}")
+        reflection = ""
+        rm = re.search(r'"reflection"\s*:\s*"([^"]*)"', text)
+        if rm: reflection = rm.group(1)
+        return {"new_trait":"","trigger":"","speech_habits":old_habits,"opinions":old_opinions,"reflection":reflection or "今天的反思没能整理好..."}
+
+    async def _maybe_evolve_personality(self):
+        if not self.config.get("ENABLE_PERSONALITY_EVOLUTION", True): return
+        evo = self._load_json(PERSONALITY_FILE, {})
+        today = datetime.now().strftime("%Y-%m-%d")
+        if evo.get("last_evolve","")[:10] == today: return
+        evolve_hour = self.config.get("EVOLVE_HOUR", 1)
+        if datetime.now().hour != evolve_hour: return
+        logger.info("[BiliBot] 🌱 开始每日性格演化反思...")
+        recent = sorted(self._memory, key=lambda x: x.get("time",""), reverse=True)[:30]
+        if len(recent) < 5:
+            logger.info("[BiliBot] 🌱 记忆太少，跳过演化"); return
+        recent_texts = "\n".join([m["text"] for m in recent[:20]])
+        old_traits = evo.get("evolved_traits", [])
+        old_habits = evo.get("speech_habits", [])
+        old_opinions = evo.get("opinions", [])
+        sp = self._get_system_prompt()
+        on = self.config.get("OWNER_NAME","") or "主人"
+        prompt = f"""现在是睡前反思时间。请根据你最近的互动经历，思考自己有没有发生什么变化。
+
+【之前已经发生的变化】
+{json.dumps(old_traits[-5:], ensure_ascii=False) if old_traits else "暂无"}
+
+【当前说话习惯】
+{json.dumps(old_habits, ensure_ascii=False) if old_habits else "暂无"}
+
+【当前对事物的看法】
+{json.dumps(old_opinions, ensure_ascii=False) if old_opinions else "暂无"}
+
+【最近的互动记录】
+{recent_texts}
+
+请思考：
+1. 最近的经历有没有让你的语气或说话方式产生微妙变化？
+2. 有没有形成新的说话习惯？
+3. 对什么事物产生了新的看法？
+
+注意：变化应该是微妙的、渐进的，不要突变。如果没什么变化就如实说。
+
+请以JSON格式回复：
+{{"new_trait": "新的变化描述（没有就留空）", "trigger": "什么触发了这个变化", "speech_habits": ["当前所有说话习惯，含旧的，最多5条"], "opinions": ["当前所有看法，含旧的，最多5条"], "reflection": "一句话的睡前感想"}}"""
+        for attempt in range(3):
+            try:
+                text = await self._llm_call(prompt, system_prompt=sp, max_tokens=1024)
+                if not text: raise ValueError("LLM返回空")
+                result = self._parse_evolve_json(text, old_habits, old_opinions)
+                if not result.get("new_trait") and result.get("reflection") == "今天的反思没能整理好...":
+                    raise ValueError(f"JSON解析兜底：{text[:100]}")
+                new_trait = result.get("new_trait","")
+                if new_trait:
+                    old_traits.append({"time":today,"change":new_trait,"trigger":result.get("trigger","")})
+                    old_traits = old_traits[-10:]
+                evo = {
+                    "version": evo.get("version",0)+1,
+                    "last_evolve": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "evolved_traits": old_traits,
+                    "speech_habits": result.get("speech_habits",old_habits)[-5:],
+                    "opinions": result.get("opinions",old_opinions)[-5:],
+                    "last_reflection": result.get("reflection","")
+                }
+                self._save_json(PERSONALITY_FILE, evo)
+                if new_trait: logger.info(f"[BiliBot] 🌱 性格演化：{new_trait}")
+                else: logger.info("[BiliBot] 🌱 今日无明显变化")
+                logger.info(f"[BiliBot] 🌱 反思：{result.get('reflection','')}")
+                return
+            except Exception as e:
+                logger.warning(f"[BiliBot] 性格演化失败（第{attempt+1}/3次）：{e}")
+                if attempt < 2: await asyncio.sleep(30)
+        evo["last_evolve"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        self._save_json(PERSONALITY_FILE, evo)
+        logger.error("[BiliBot] 🌱 性格演化连续3次失败，今日放弃")
 
     # ===== 记忆系统 =====
     def _save_memory_record(self, rpid, thread_id, user_id, username, content, reply_text, source="bilibili"):
@@ -283,20 +469,59 @@ class BiliBiliBot(Star):
             self._memory.append(comp); self._save_json(MEMORY_FILE, self._memory)
             logger.info(f"[BiliBot] 🗜️ 压缩完成：{len(old)} 条 → 1 条")
         except Exception as e: logger.error(f"[BiliBot] 记忆压缩失败：{e}")
-    async def _build_memory_context(self, thread_id, user_id, query_text, video_context=""):
+    async def _build_memory_context(self, thread_id, user_id, query_text, oid=0, comment_type=1):
+        """
+        完整记忆调取逻辑：
+        必定注入：永久记忆、用户画像
+        视频评论区：视频信息+总结、UP主印象（非自己）、UP主相关记忆
+        评论线上下文：同thread最近10条
+        用户语义记忆：优先该UID，再补通用相关
+        """
         parts = []
-        if video_context: parts.append(video_context)
+        bot_mid = self.config.get("DEDE_USER_ID","")
+        video_cache_entry = None
+
+        # 1. 永久记忆
         perm = self._load_json(PERMANENT_MEMORY_FILE, [])
-        if perm: parts.append("【Bot的自我认知】\n" + "\n".join([f"[{p.get('time','?')}] {p['text']}" for p in perm[-20:]]))
+        if perm:
+            parts.append("【Bot的自我认知】\n" + "\n".join([f"[{p.get('time','?')}] {p['text']}" for p in perm[-20:]]))
+
+        # 2. 用户画像（词条式）
         upc = self._get_user_profile_context(user_id)
         if upc: parts.append(upc)
+
+        # 3. 视频评论区场景
+        if comment_type == 1 and oid:
+            vc, cache_entry = await self._get_video_context(oid, comment_type)
+            video_cache_entry = cache_entry
+            if vc: parts.append(vc)
+            # UP主印象（不是自己的视频才注入）
+            if cache_entry:
+                up_mid = str(cache_entry.get("owner_mid",""))
+                if up_mid and up_mid != bot_mid:
+                    up_profile = self._get_user_profile_context(up_mid)
+                    if up_profile:
+                        parts.append(up_profile.replace("【对该用户的了解】","【该视频UP主的了解】"))
+                    # UP主相关语义记忆
+                    up_mems = self._get_user_semantic_memories(up_mid, query_text)
+                    if up_mems:
+                        parts.append("【与该UP主的历史互动】\n" + "\n".join(up_mems))
+
+        # 4. 评论线上下文（最近10条）
         td = self._get_thread_memories(thread_id)
         if td:
-            if len(td)>THREAD_COMPRESS_THRESHOLD: parts.append("【本评论线近期对话】\n"+"\n".join(td[-4:]))
-            else: parts.append("【本评论线对话】\n"+"\n".join(td))
+            parts.append("【本评论线对话】\n" + "\n".join(td[-10:]))
+
+        # 5. 用户语义记忆（优先该UID相关）
+        user_mems = self._get_user_semantic_memories(user_id, query_text)
+        if user_mems:
+            parts.append("【与该用户的相关记忆】\n" + "\n".join(user_mems))
         else:
-            sd = self._get_user_semantic_memories(user_id, query_text)
-            if sd: parts.append("【相关历史记忆】\n"+"\n".join(sd))
+            # 没有该用户的记忆，搜全局相关
+            general_mems = self._search_memories(query_text, limit=3)
+            if general_mems:
+                parts.append("【相关历史记忆】\n" + "\n".join(general_mems))
+
         return "\n\n".join(parts) if parts else ""
 
     # ===== 视频信息 =====
@@ -310,22 +535,58 @@ class BiliBiliBot(Star):
         try:
             d, _ = await self._http_get("https://api.bilibili.com/x/web-interface/view", params={"aid":oid})
             if d["code"]==0:
-                v=d["data"]; return {"bvid":v.get("bvid",""),"title":v.get("title",""),"desc":v.get("desc",""),"owner_name":v.get("owner",{}).get("name",""),"owner_mid":v.get("owner",{}).get("mid",""),"tname":v.get("tname","")}
+                v=d["data"]
+                return {"bvid":v.get("bvid",""),"title":v.get("title",""),"desc":v.get("desc",""),"owner_name":v.get("owner",{}).get("name",""),"owner_mid":v.get("owner",{}).get("mid",""),"tname":v.get("tname",""),"duration":v.get("duration",0),"pic":v.get("pic","")}
         except Exception as e: logger.error(f"[BiliBot] 获取视频信息失败：{e}")
         return None
+    async def _analyze_video_with_vision(self, video_info):
+        """用视觉模型分析视频封面+信息，生成内容概括"""
+        client = self._get_video_vision_client()
+        model = self.config.get("VIDEO_VISION_MODEL","")
+        dur_min = video_info.get("duration",0) // 60
+        dur_sec = video_info.get("duration",0) % 60
+        text_prompt = f"""请根据以下B站视频信息，写一段简洁的内容概括（150字以内），包括：这个视频大概在讲什么、是什么类型/风格、可能的受众。
+
+视频标题：{video_info.get('title','未知')}
+UP主：{video_info.get('owner_name','未知')}
+分区：{video_info.get('tname','未知')}
+时长：{dur_min}分{dur_sec}秒
+简介：{video_info.get('desc','无')[:500]}
+
+直接输出概括内容，不要加前缀。"""
+        # 尝试用视觉模型 + 封面
+        if client and model and video_info.get("pic"):
+            try:
+                b64 = await self._fetch_image_base64(video_info["pic"])
+                if b64:
+                    content = [{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}},{"type":"text","text":text_prompt}]
+                    result = self._vision_call(client, model, content, max_tokens=250)
+                    if result: return result
+            except Exception as e: logger.warning(f"[BiliBot] 视觉分析封面失败: {e}")
+        # 回退：纯文本LLM分析
+        result = await self._llm_call(text_prompt, max_tokens=250)
+        return result or f"视频《{video_info.get('title','未知')}》，UP主：{video_info.get('owner_name','未知')}，分区：{video_info.get('tname','未知')}。简介：{video_info.get('desc','无')[:100]}"
     async def _get_video_context(self, oid, comment_type):
-        if comment_type!=1: return ""
+        """获取视频上下文：基础信息 + 内容总结（有缓存用缓存，没有就分析）"""
+        if comment_type != 1: return "", None
         vc = self._load_json(VIDEO_MEMORY_FILE, {})
         bvid = await self._oid_to_bvid(oid)
-        if not bvid: return ""
+        if not bvid: return "", None
+        # 有缓存直接用
         if bvid in vc:
-            c=vc[bvid]; return f"【当前视频】标题：{c['title']} | UP主：{c['owner_name']} | {c.get('analysis','')}"
+            c = vc[bvid]
+            ctx = f"【当前视频】\n标题：{c['title']}\nUP主：{c['owner_name']}（UID:{c.get('owner_mid','')})）\n分区：{c.get('tname','')}\n简介：{c.get('desc','')[:150]}\n内容概括：{c.get('analysis','')}"
+            return ctx, c
+        # 没缓存，获取视频信息并分析
         vi = await self._get_video_info(oid)
-        if not vi: return ""
-        analysis = f"视频《{vi['title']}》，UP主：{vi['owner_name']}，分区：{vi['tname']}。简介：{vi.get('desc','')[:200]}"
-        vc[bvid] = {"title":vi["title"],"desc":vi.get("desc","")[:200],"owner_name":vi["owner_name"],"owner_mid":vi["owner_mid"],"tname":vi["tname"],"analysis":analysis,"time":datetime.now().strftime("%Y-%m-%d %H:%M")}
-        self._save_json(VIDEO_MEMORY_FILE, vc)
-        return f"【当前视频】标题：{vi['title']} | UP主：{vi['owner_name']} | {analysis}"
+        if not vi: return "", None
+        logger.info(f"[BiliBot] 📹 新视频，分析中：《{vi['title']}》by {vi['owner_name']}")
+        analysis = await self._analyze_video_with_vision(vi)
+        logger.info(f"[BiliBot] 📹 分析结果：{analysis[:60]}...")
+        cache_entry = {"title":vi["title"],"desc":vi.get("desc","")[:200],"owner_name":vi["owner_name"],"owner_mid":str(vi["owner_mid"]),"tname":vi["tname"],"analysis":analysis,"time":datetime.now().strftime("%Y-%m-%d %H:%M")}
+        vc[bvid] = cache_entry; self._save_json(VIDEO_MEMORY_FILE, vc)
+        ctx = f"【当前视频】\n标题：{vi['title']}\nUP主：{vi['owner_name']}（UID:{vi['owner_mid']}）\n分区：{vi['tname']}\n简介：{vi.get('desc','')[:150]}\n内容概括：{analysis}"
+        return ctx, cache_entry
 
     # ===== Cookie管理 =====
     async def check_cookie(self):
@@ -433,35 +694,34 @@ class BiliBiliBot(Star):
                 if persona: return persona["prompt"]
             except: pass
         return self.config.get("CUSTOM_SYSTEM_PROMPT","你是一个B站UP主的AI助手。")
-    async def _generate_reply(self, content, mid, username, thread_id, oid, comment_type):
+    async def _generate_reply(self, content, mid, username, thread_id, oid, comment_type, image_desc=""):
         try:
             sp = self._get_system_prompt(); on = self.config.get("OWNER_NAME","") or "主人"
             is_owner = str(mid)==str(self.config.get("OWNER_MID",""))
             cs = self._affection.get(str(mid),0); lv = self._get_level(cs, mid)
             lp = self._get_level_prompts()[lv]
-            vc = await self._get_video_context(oid, comment_type)
-            mc = await self._build_memory_context(thread_id, mid, content, vc)
+            mc = await self._build_memory_context(thread_id, mid, content, oid=oid, comment_type=comment_type)
             ms = f"\n\n【记忆参考】\n{mc}" if mc else ""
             mood,mp = self._get_today_mood(); fest = self._get_festival_prompt()
             fs = f"\n特殊日期：{fest}" if fest else ""
+            pp = self._get_personality_prompt()
+            pps = f"\n{pp}" if pp else ""
             now = datetime.now().strftime("%Y-%m-%d %H:%M")
-            prompt = f"""{lp}\n\n【底线】拒绝：表白暧昧、引战、黄赌毒政治。\n\n【今日状态】{mood} — {mp}{fs}\n\n当前时间：{now}{ms}\n\n「{username}」{'（这是'+on+'）' if is_owner else ''}的评论：「{content}」\n\n请以JSON格式回复：\n{{"score_delta": 数字, "reply": "回复内容", "impression": "印象", "user_facts": ["个人信息"], "permanent_memory": "永久记忆(没有则留空)"}}\n\nscore_delta：友善+2，普通+1，不友善-2，辱骂-5。reply不超过50字。"""
+            comment_text = content
+            if image_desc: comment_text += f"\n[用户发送了图片，内容是：{image_desc}]"
+            prompt = f"""{lp}{pps}\n\n【底线】拒绝：表白暧昧、引战、黄赌毒政治。\n\n【今日状态】{mood} — {mp}{fs}\n\n当前时间：{now}{ms}\n\n「{username}」{'（这是'+on+'）' if is_owner else ''}的评论：「{comment_text}」\n\n请以JSON格式回复：\n{{"score_delta": 数字, "reply": "回复内容", "impression": "印象", "user_facts": ["个人信息"], "permanent_memory": "永久记忆(没有则留空)"}}\n\nscore_delta：友善+2，普通+1，不友善-2，辱骂-5。reply不超过50字。"""
             rt = await self._llm_call(prompt, system_prompt=sp)
             if not rt: return None
             rt = rt.replace("```json","").replace("```","").strip()
             r = None
-            # 尝试直接解析
             try: r = json.loads(rt)
             except: pass
-            # 尝试正则提取 JSON
             if r is None:
                 m = re.search(r'\{.*\}', rt, re.DOTALL)
                 if m:
                     try: r = json.loads(m.group())
                     except: pass
-            # 终极兜底：把原文当回复
             if r is None or not isinstance(r, dict):
-                # 尝试提取 reply 字段
                 rm = re.search(r'"reply"\s*:\s*"([^"]*)"', rt)
                 reply_text = rm.group(1) if rm else rt[:50]
                 r = {"score_delta":1,"reply":reply_text,"impression":"","user_facts":[],"permanent_memory":""}
@@ -486,6 +746,321 @@ class BiliBiliBot(Star):
             if d["code"]==0: return [i["mid"] for i in d.get("data",{}).get("list",[])]
         except Exception as e: logger.error(f"[BiliBot] 获取关注列表失败: {e}")
         return []
+
+    # ===== 主动视频系统 =====
+    PREFERRED_TIDS = [17, 160, 211, 3, 13, 167, 321, 36, 129]  # 游戏/生活/美食/音乐/番剧/同人/vup/科技/绘画
+
+    def _generate_daily_schedule(self):
+        n_times = self.config.get("PROACTIVE_TIMES_COUNT", 2)
+        times = sorted(random.sample(range(10, 23), min(n_times, 12)))
+        times = [(h, random.randint(0, 59)) for h in times]
+        schedule = {
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "proactive_times": [f"{h}:{m:02d}" for h, m in times],
+            "proactive_triggered": [],
+        }
+        self._save_json(SCHEDULE_FILE, schedule)
+        return times, set()
+
+    def _load_or_generate_schedule(self):
+        try:
+            schedule = self._load_json(SCHEDULE_FILE, {})
+            if schedule.get("date") == datetime.now().strftime("%Y-%m-%d"):
+                times = []
+                for t in schedule.get("proactive_times", []):
+                    h, m = t.split(":"); times.append((int(h), int(m)))
+                triggered = set(schedule.get("proactive_triggered", []))
+                return times, triggered
+        except: pass
+        return self._generate_daily_schedule()
+
+    def _save_schedule_state(self, times, triggered):
+        schedule = {
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "proactive_times": [f"{h}:{m:02d}" for h, m in times],
+            "proactive_triggered": list(triggered),
+        }
+        self._save_json(SCHEDULE_FILE, schedule)
+
+    async def _get_up_latest_video(self, mid):
+        try:
+            params = await self.sign_wbi_params({"mid": mid, "ps": 1, "pn": 1, "order": "pubdate"})
+            d, _ = await self._http_get("https://api.bilibili.com/x/space/wbi/arc/search", params=params)
+            if d.get("code") != 0: return None
+            vlist = d.get("data", {}).get("list", {}).get("vlist", [])
+            if not vlist: return None
+            v = vlist[0]
+            return {"bvid": v["bvid"], "title": v["title"], "desc": v.get("description",""), "up_name": v["author"], "up_mid": mid, "pubdate": v["created"], "pic": v.get("pic","")}
+        except Exception as e:
+            logger.error(f"[BiliBot] 获取UP主最新视频失败: {e}"); return None
+
+    async def _get_hot_videos_by_tid(self, tid):
+        MIN_VIEWS = 10000; videos = []
+        try:
+            d, _ = await self._http_get("https://api.bilibili.com/x/web-interface/ranking/region", params={"rid": tid, "day": 7})
+            if d["code"] == 0:
+                for v in d.get("data", []):
+                    play = int(v.get("play", v.get("stat", {}).get("view", 0)) or 0)
+                    if play >= MIN_VIEWS:
+                        videos.append({"bvid": v.get("bvid",""), "title": v.get("title",""), "desc": v.get("description", v.get("desc","")), "up_name": v.get("author", v.get("owner",{}).get("name","")), "up_mid": v.get("mid", v.get("owner",{}).get("mid",0)), "pubdate": v.get("pubdate", v.get("create", v.get("created",0))), "pic": v.get("pic",""), "view": play})
+        except Exception as e: logger.warning(f"[BiliBot] 热榜API失败: {e}")
+        if len(videos) < 5:
+            try:
+                d, _ = await self._http_get("https://api.bilibili.com/x/web-interface/newlist", params={"rid": tid, "ps": 50, "pn": 1, "type": 0})
+                if d["code"] == 0:
+                    for v in d.get("data",{}).get("archives",[]):
+                        play = int(v.get("stat",{}).get("view",0) or 0)
+                        if play >= MIN_VIEWS:
+                            videos.append({"bvid": v["bvid"], "title": v["title"], "desc": v.get("desc",""), "up_name": v["owner"]["name"], "up_mid": v["owner"]["mid"], "pubdate": v.get("pubdate",0), "pic": v.get("pic",""), "view": play})
+            except Exception as e: logger.warning(f"[BiliBot] newlist API失败: {e}")
+        seen = set(); unique = []
+        for v in videos:
+            if v["bvid"] and v["bvid"] not in seen: seen.add(v["bvid"]); unique.append(v)
+        unique.sort(key=lambda x: x.get("view",0), reverse=True)
+        return unique
+
+    async def _get_video_oid(self, bvid):
+        try:
+            d, _ = await self._http_get("https://api.bilibili.com/x/web-interface/view", params={"bvid": bvid})
+            if d.get("code") == 0: return d["data"]["aid"]
+        except: pass
+        return None
+
+    async def _analyze_video_text(self, video_info):
+        """用LLM纯文本分析视频（基于标题、简介、分区）"""
+        prompt = f"""请根据以下B站视频信息，写一段简洁的内容概括（150字以内），包括：这个视频大概在讲什么、是什么类型/风格、可能的受众。
+
+视频标题：{video_info.get('title', '未知')}
+UP主：{video_info.get('up_name', '未知')}
+分区：{video_info.get('tname', '未知')}
+简介：{video_info.get('desc', '无')[:500]}
+
+直接输出概括内容，不要加前缀。"""
+        result = await self._llm_call(prompt, max_tokens=250)
+        return result or f"视频《{video_info.get('title','未知')}》，UP主：{video_info.get('up_name','未知')}"
+
+    async def _evaluate_video(self, video_info, video_description):
+        sp = self._get_system_prompt()
+        prompt = f"""你刚看完一个B站视频：
+- UP主：{video_info.get('up_name','')}
+- 标题：{video_info.get('title','')}
+- 简介：{video_info.get('desc','')[:100]}
+- 视频内容：{video_description}
+
+请以JSON格式回复：
+{{"score": 1到10的整数评分, "comment": "你想在评论区说的话（15-30字）", "mood": "看完后的心情（开心/平静/无聊/感动/好笑/震撼/困惑 选一个）", "review": "稍微详细的感想（50字以内）", "want_follow": true或false, "recommend_owner": true或false, "recommend_reason": "推荐理由（20字以内，不推荐则留空）"}}
+
+comment要求：像B站用户真实评论，可以玩梗吐槽。
+评分：1-3差，4-5一般，6-7不错，8-9很好，10神作。不要无脑高分。
+直接输出JSON。"""
+        try:
+            text = await self._llm_call(prompt, system_prompt=sp, max_tokens=350)
+            if not text: return None
+            text = text.replace("```json","").replace("```","").strip()
+            m = re.search(r'\{.*\}', text, re.DOTALL)
+            if m: return json.loads(m.group())
+            return json.loads(text)
+        except Exception as e:
+            logger.error(f"[BiliBot] 视频评价失败: {e}"); return None
+
+    async def _generate_proactive_comment(self, video_info, video_description):
+        sp = self._get_system_prompt()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        prompt = f"""当前时间：{now}
+
+你刚刚看完了一个视频：
+- UP主：{video_info.get('up_name','')}
+- 标题：{video_info.get('title','')}
+- 视频内容：{video_description}
+
+请以B站观众的身份，发一条自然真实的评论。要求：
+1. 根据视频内容说有意义的话，不要无脑夸
+2. 体现你的性格
+3. 不超过40字
+4. 直接输出评论内容，不加任何前缀"""
+        result = await self._llm_call(prompt, system_prompt=sp, max_tokens=100)
+        return result or "这个视频还不错"
+
+    async def _send_comment(self, oid, comment_text, oid_type=1):
+        try:
+            d, _ = await self._http_post(BILI_REPLY_URL, data={"oid": oid, "type": oid_type, "message": comment_text, "csrf": self.config.get("BILI_JCT","")})
+            return d.get("code") == 0
+        except Exception as e:
+            logger.error(f"[BiliBot] 发送评论异常: {e}"); return False
+
+    async def _like_video(self, aid):
+        try:
+            d, _ = await self._http_post("https://api.bilibili.com/x/web-interface/archive/like", data={"aid": aid, "like": 1, "csrf": self.config.get("BILI_JCT","")})
+            return d.get("code") == 0
+        except: return False
+
+    async def _coin_video(self, aid, num=1):
+        try:
+            d, _ = await self._http_post("https://api.bilibili.com/x/web-interface/coin/add", data={"aid": aid, "multiply": num, "select_like": 0, "csrf": self.config.get("BILI_JCT","")})
+            return d.get("code") == 0
+        except: return False
+
+    async def _fav_video(self, aid):
+        try:
+            d, _ = await self._http_get("https://api.bilibili.com/x/v3/fav/folder/created/list-all", params={"up_mid": self.config.get("DEDE_USER_ID",""), "type": 2})
+            if d["code"] != 0: return False
+            fav_id = d["data"]["list"][0]["id"]
+            d2, _ = await self._http_post("https://api.bilibili.com/x/v3/fav/resource/deal", data={"rid": aid, "type": 2, "add_media_ids": fav_id, "csrf": self.config.get("BILI_JCT","")})
+            return d2.get("code") == 0
+        except: return False
+
+    async def _follow_user(self, mid):
+        try:
+            d, _ = await self._http_post("https://api.bilibili.com/x/relation/modify", data={"fid": mid, "act": 1, "re_src": 11, "csrf": self.config.get("BILI_JCT","")})
+            return d.get("code") == 0
+        except: return False
+
+    async def _run_proactive(self):
+        """主动刷B站：看视频、评价、点赞/投币/收藏/关注/评论"""
+        daily_watch = self.config.get("PROACTIVE_VIDEO_COUNT", 3)
+        daily_comment = self.config.get("PROACTIVE_COMMENT_COUNT", 2)
+        watch_log = self._load_json(WATCH_LOG_FILE, [])
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        today_watched = [l for l in watch_log if l.get("time","").startswith(today_str)]
+        if len(today_watched) >= daily_watch:
+            logger.info(f"[BiliBot] 今天已看 {len(today_watched)} 个视频，不再刷"); return
+        logger.info(f"[BiliBot] 🎯 主动刷B站 | 目标：看 {daily_watch} 个视频，评论 {daily_comment} 条")
+        external_memory = self._load_json(EXTERNAL_MEMORY_FILE, {})
+        commented_videos = set(self._load_json(COMMENTED_FILE, []))
+        watched_bvids = set(commented_videos)
+        for entry in watch_log: watched_bvids.add(entry.get("bvid",""))
+        min_pubdate = int(datetime(2025, 1, 1).timestamp())
+        target_videos = []
+        # 1. 特别关心的UP主
+        special_mids = self.config.get("PROACTIVE_FOLLOW_UIDS", [])
+        for mid in special_mids:
+            video = await self._get_up_latest_video(mid)
+            if video and video["bvid"] not in watched_bvids:
+                pubdate = video.get("pubdate", 0)
+                if isinstance(pubdate, str):
+                    try: pubdate = int(pubdate)
+                    except: pubdate = 0
+                if pubdate >= min_pubdate:
+                    target_videos.insert(0, video)
+                    logger.info(f"[BiliBot] ⭐ 特别关心：{video['up_name']} - {video['title']}")
+        # 2. 关注的UP主
+        following_mids = await self.get_followings()
+        today = datetime.now().date()
+        for mid in following_mids:
+            video = await self._get_up_latest_video(mid)
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+            if video and video["bvid"] not in watched_bvids:
+                pubdate = video.get("pubdate", 0)
+                if isinstance(pubdate, str):
+                    try: pubdate = int(pubdate)
+                    except: pubdate = 0
+                if pubdate < min_pubdate: continue
+                is_today = pubdate and datetime.fromtimestamp(pubdate).date() == today
+                if is_today:
+                    target_videos.insert(0, video)
+                    logger.info(f"[BiliBot] 🔔 今日更新：{video['up_name']} - {video['title']}")
+        # 3. 分区热门
+        tids = list(self.PREFERRED_TIDS); random.shuffle(tids)
+        for tid in tids:
+            if len(target_videos) >= daily_watch + 5: break
+            hot = await self._get_hot_videos_by_tid(tid)
+            for v in hot:
+                if v["bvid"] not in watched_bvids:
+                    pubdate = v.get("pubdate", 0)
+                    if isinstance(pubdate, str):
+                        try: pubdate = int(pubdate)
+                        except: pubdate = 0
+                    if pubdate >= min_pubdate: target_videos.append(v)
+        # 去重 + 随机
+        seen = set(); unique = []
+        for v in target_videos:
+            if v["bvid"] not in seen: seen.add(v["bvid"]); unique.append(v)
+        sc = len(special_mids)
+        if len(unique) > sc:
+            tail = unique[sc:]; random.shuffle(tail); unique = unique[:sc] + tail
+        logger.info(f"[BiliBot] 📋 共找到 {len(unique)} 个视频")
+        watch_count = 0; comment_count = 0
+        for video in unique:
+            if watch_count >= daily_watch: break
+            bvid = video["bvid"]
+            if str(video.get("up_mid","")) == self.config.get("DEDE_USER_ID",""): continue
+            logger.info(f"[BiliBot] 🎬 [{watch_count+1}/{daily_watch}] {video['title']} by {video.get('up_name','')}")
+            # 文本分析（不下载视频，用标题+简介分析）
+            vi = await self._get_video_info(video.get("oid") or await self._get_video_oid(bvid) or 0) if not video.get("tname") else None
+            tname = (vi or video).get("tname", "")
+            analysis_info = {**video, "tname": tname}
+            video_description = await self._analyze_video_text(analysis_info)
+            logger.info(f"[BiliBot] 📝 分析：{video_description[:60]}...")
+            # 评价
+            evaluation = await self._evaluate_video(video, video_description)
+            if not evaluation:
+                logger.warning("[BiliBot] 评价失败，跳过互动")
+                watch_log.append({"time": datetime.now().strftime("%Y-%m-%d %H:%M"), "bvid": bvid, "title": video.get("title",""), "up_name": video.get("up_name",""), "score": 0, "mood": "未知", "comment": "评价失败", "review": "", "actions": [], "pic": video.get("pic","")})
+                self._save_json(WATCH_LOG_FILE, watch_log[-200:]); watched_bvids.add(bvid); watch_count += 1; continue
+            score = evaluation.get("score", 5)
+            comment = evaluation.get("comment", "")
+            mood = evaluation.get("mood", "平静")
+            review = evaluation.get("review", "")
+            want_follow = evaluation.get("want_follow", False)
+            logger.info(f"[BiliBot] ⭐ 评分：{score}/10 | 心情：{mood} | 短评：{comment}")
+            # 根据评分互动
+            oid = await self._get_video_oid(bvid)
+            actions = []
+            if oid:
+                if score >= 6 and self.config.get("PROACTIVE_LIKE", True):
+                    if await self._like_video(oid): actions.append("👍点赞"); logger.info("[BiliBot] 👍 点赞成功")
+                if score >= 8 and self.config.get("PROACTIVE_COIN", False):
+                    if await self._coin_video(oid): actions.append("🪙投币"); logger.info("[BiliBot] 🪙 投币成功")
+                if score >= 8 and self.config.get("PROACTIVE_FAV", True):
+                    if await self._fav_video(oid): actions.append("⭐收藏"); logger.info("[BiliBot] ⭐ 收藏成功")
+                if score >= 7 and comment_count < daily_comment and self.config.get("PROACTIVE_COMMENT", True):
+                    proactive_comment = await self._generate_proactive_comment(video, video_description)
+                    if await self._send_comment(oid, proactive_comment):
+                        actions.append("💬评论"); comment_count += 1
+                        logger.info(f"[BiliBot] 💬 评论成功：{proactive_comment}")
+                        commented_videos.add(bvid); self._save_json(COMMENTED_FILE, list(commented_videos))
+                        # 保存主动评论日志
+                        pl = self._load_json(PROACTIVE_LOG_FILE, [])
+                        pl.append({"time": datetime.now().strftime("%Y-%m-%d %H:%M"), "bvid": bvid, "title": video.get("title",""), "comment": proactive_comment})
+                        self._save_json(PROACTIVE_LOG_FILE, pl[-100:])
+                # 推荐给主人
+                if evaluation.get("recommend_owner", False):
+                    on = self.config.get("OWNER_NAME","") or "主人"
+                    owner_bili = self.config.get("OWNER_BILI_NAME", "")
+                    if owner_bili:
+                        try:
+                            rec_prompt = f"""你刚看完视频「{video.get('title','')}」，觉得很不错想推荐给{on}。
+写一句简短的推荐语，要求：
+- 用你自己的语气，自然随意
+- 不超过25字
+- 不要带@、不要带任何人名或称呼
+- 直接输出推荐语"""
+                            rec_text = await self._llm_call(rec_prompt, system_prompt=self._get_system_prompt(), max_tokens=60)
+                            rec_text = re.sub(r'@\S+\s*', '', rec_text or "你可能会喜欢这个")
+                            rec_text = re.sub(r'^(主人|柠弥|亲爱的)[，,\s]*', '', rec_text)
+                            rec_msg = f"@{owner_bili} {rec_text}"
+                            if await self._send_comment(oid, rec_msg):
+                                actions.append("📢推荐给主人"); logger.info(f"[BiliBot] 📢 已@主人：{rec_msg}")
+                        except: pass
+            # 关注UP主
+            if (score >= 9 or want_follow) and self.config.get("PROACTIVE_FOLLOW", True):
+                if str(video.get("up_mid","")) != str(self.config.get("OWNER_MID","")):
+                    if await self._follow_user(video["up_mid"]):
+                        actions.append("➕关注"); logger.info(f"[BiliBot] ➕ 关注了 {video.get('up_name','')}")
+            # 保存观影日记
+            log_entry = {"time": datetime.now().strftime("%Y-%m-%d %H:%M"), "bvid": bvid, "title": video.get("title",""), "up_name": video.get("up_name",""), "up_mid": str(video.get("up_mid","")), "score": score, "mood": mood, "comment": comment, "review": review, "actions": actions, "pic": video.get("pic","")}
+            watch_log.append(log_entry); self._save_json(WATCH_LOG_FILE, watch_log[-200:])
+            # 存入外部记忆
+            if bvid not in external_memory:
+                external_memory[bvid] = {"title": video.get("title",""), "up_name": video.get("up_name",""), "up_mid": str(video.get("up_mid","")), "description": video_description, "score": score, "mood": mood, "review": review, "watched_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "comments": []}
+                self._save_json(EXTERNAL_MEMORY_FILE, external_memory)
+            watched_bvids.add(bvid); watch_count += 1
+            action_str = " ".join(actions) if actions else "（默默看完）"
+            logger.info(f"[BiliBot] 📊 互动：{action_str}")
+            wait = random.randint(30, 120)
+            logger.info(f"[BiliBot] ⏳ 等待 {wait} 秒...")
+            await asyncio.sleep(wait)
+        logger.info(f"[BiliBot] 🎉 刷B站完成！看了 {watch_count} 个视频，评论了 {comment_count} 条")
 
     # ===== QQ命令 =====
     @filter.command("bili登录")
@@ -519,7 +1094,18 @@ class BiliBiliBot(Star):
     async def cmd_status(self, event: AstrMessageEvent):
         valid,info=await self.check_cookie(); mood,_=self._get_today_mood()
         mc=len(self._memory); pc=len(self._load_json(USER_PROFILE_FILE,{})); pmc=len(self._load_json(PERMANENT_MEMORY_FILE,[]))
-        lines = [f"📺 BiliBot 状态","━━━━━━━━━━━━",f"🍪 {info}",f"{'🟢 运行中' if self._running else '🔴 未运行'}",f"🧠 记忆:{mc}条 | 💎永久:{pmc}条 | 👤档案:{pc}个",f"🎭 心情:{mood}",f"回复:{'✅' if self.config.get('ENABLE_REPLY',True) else '❌'} 好感:{'✅' if self.config.get('ENABLE_AFFECTION',True) else '❌'} 心情:{'✅' if self.config.get('ENABLE_MOOD',True) else '❌'}"]
+        evo=self._load_json(PERSONALITY_FILE,{}); evo_ver=evo.get("version",0); evo_last=evo.get("last_evolve","从未")
+        wl=self._load_json(WATCH_LOG_FILE,[]); today_watched=len([l for l in wl if l.get("time","").startswith(datetime.now().strftime("%Y-%m-%d"))])
+        lines = [
+            f"📺 BiliBot v0.3.0 状态","━━━━━━━━━━━━",f"🍪 {info}",
+            f"{'🟢 运行中' if self._running else '🔴 未运行'}",
+            f"🧠 记忆:{mc}条 | 💎永久:{pmc}条 | 👤档案:{pc}个",
+            f"🎭 心情:{mood} | 🌱性格v{evo_ver}（{evo_last[:10]}）",
+            f"📹 今日已看:{today_watched}个视频",
+            f"回复:{'✅' if self.config.get('ENABLE_REPLY',True) else '❌'} 好感:{'✅' if self.config.get('ENABLE_AFFECTION',True) else '❌'} 心情:{'✅' if self.config.get('ENABLE_MOOD',True) else '❌'}",
+            f"主动:{'✅' if self.config.get('ENABLE_PROACTIVE',False) else '❌'} 演化:{'✅' if self.config.get('ENABLE_PERSONALITY_EVOLUTION',True) else '❌'}",
+            f"视频视觉:{'✅' if self.config.get('VIDEO_VISION_API_KEY','') else '❌'} 图片识别:{'✅' if self.config.get('IMAGE_VISION_API_KEY','') else '❌'}"
+        ]
         yield event.plain_result("\n".join(lines))
     @filter.command("bili启动")
     async def cmd_start(self, event: AstrMessageEvent):
@@ -706,15 +1292,36 @@ class BiliBiliBot(Star):
     async def _stop_bot(self):
         self._running=False
         if self._task: self._task.cancel(); self._task=None
+        if self._proactive_task and not self._proactive_task.done(): self._proactive_task.cancel(); self._proactive_task=None
         logger.info("[BiliBot] 停止")
     async def _main_loop(self):
         logger.info("[BiliBot] 主循环开始")
         while self._running:
             try:
+                # 性格演化（独立于休眠）
+                await self._maybe_evolve_personality()
                 h=datetime.now().hour; ss=self.config.get("SLEEP_START",2); se=self.config.get("SLEEP_END",8)
                 if ss<=h<se: await asyncio.sleep(60); continue
                 ci=self.config.get("COOKIE_CHECK_INTERVAL",6)*3600
                 if time.time()-self._last_cookie_check>ci: await self._check_and_refresh_cookie(); self._last_cookie_check=time.time()
+                # 主动视频调度
+                if self.config.get("ENABLE_PROACTIVE", False):
+                    now_dt = datetime.now()
+                    today_str = now_dt.strftime("%Y-%m-%d")
+                    sched = self._load_json(SCHEDULE_FILE, {})
+                    if sched.get("date") != today_str:
+                        self._proactive_times, self._proactive_triggered = self._generate_daily_schedule()
+                        logger.info(f"[BiliBot] 📅 新的一天！主动视频时间：{[f'{h}:{m:02d}' for h,m in self._proactive_times]}")
+                    elif not self._proactive_times:
+                        self._proactive_times, self._proactive_triggered = self._load_or_generate_schedule()
+                    for ph, pm in self._proactive_times:
+                        key = f"{ph}:{pm:02d}"
+                        if key not in self._proactive_triggered and (now_dt.hour > ph or (now_dt.hour == ph and now_dt.minute >= pm)):
+                            if self._proactive_task is None or self._proactive_task.done():
+                                self._proactive_task = asyncio.create_task(self._run_proactive())
+                                self._proactive_triggered.add(key)
+                                self._save_schedule_state(self._proactive_times, self._proactive_triggered)
+                                logger.info(f"[BiliBot] 🎯 触发主动视频（{key}）")
                 if self.config.get("ENABLE_REPLY",True): await self._poll_and_reply()
                 await asyncio.sleep(self.config.get("POLL_INTERVAL",20))
             except asyncio.CancelledError: break
@@ -759,7 +1366,14 @@ class BiliBiliBot(Star):
                     replied.add(rpid); self._save_json(REPLIED_FILE,list(replied)); continue
                 cs=self._affection.get(str(mid),0); lv=self._get_level(cs,mid)
                 logger.info(f"[BiliBot] 📩 {username}（{LEVEL_NAMES[lv]}|{cs}分）：{content[:50]}")
-                result = await self._generate_reply(content, mid, username, thread_id, oid, ct)
+                # 检测评论中的图片
+                image_desc = ""
+                image_urls = await self._get_comment_images(oid, rpid, ct)
+                if image_urls:
+                    logger.info(f"[BiliBot] 🖼️ 发现 {len(image_urls)} 张图片，识别中...")
+                    image_desc = await self._recognize_images(image_urls)
+                    if image_desc: logger.info(f"[BiliBot] 🖼️ 图片内容：{image_desc[:50]}...")
+                result = await self._generate_reply(content, mid, username, thread_id, oid, ct, image_desc=image_desc)
                 if not result or not result.get("reply"):
                     self._retry_counts[rpid] = self._retry_counts.get(rpid, 0) + 1
                     self._consecutive_llm_failures += 1
@@ -798,8 +1412,15 @@ class BiliBiliBot(Star):
                     if should_block and str(mid)!=str(self.config.get("OWNER_MID","")):
                         await self._send_reply(oid,rpid,ct,"我不想和你说话了。"); await self._block_user(int(mid))
                         logger.info(f"[BiliBot] 🚫 拉黑 {username}"); replied.add(rpid); self._save_json(REPLIED_FILE,list(replied)); continue
-                if imp or uf: self._update_user_profile(mid, impression=imp or None, new_facts=uf or None)
-                # 永久记忆判断逻辑待重写，暂不存入
+                if imp or uf: self._update_user_profile(mid, username=username, impression=imp or None, new_facts=uf or None)
+                if pm:
+                    perm = self._load_json(PERMANENT_MEMORY_FILE, [])
+                    if len(perm) < 20:
+                        perm.append({"text": pm, "time": datetime.now().strftime("%Y-%m-%d %H:%M")})
+                        self._save_json(PERMANENT_MEMORY_FILE, perm)
+                        logger.info(f"[BiliBot] 💎 新增永久记忆：{pm[:50]}")
+                    else:
+                        logger.info(f"[BiliBot] 💎 永久记忆已满（20条），跳过：{pm[:30]}")
                 logger.info(f"[BiliBot] 💬 {username}: {ai_reply[:50]}")
                 success=await self._send_reply(oid,rpid,ct,ai_reply)
                 if success:

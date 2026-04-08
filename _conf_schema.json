@@ -1,25 +1,29 @@
 {
-  "SESSDATA": {
-    "description": "B站 Cookie SESSDATA（登录后获取）",
+  "LLM_PROVIDER_ID": {
+    "description": "选择用于回复/记忆压缩的LLM（留空用AstrBot默认）",
     "type": "string",
     "default": "",
-    "hint": "浏览器登录B站后，从Cookie中复制"
+    "_special": "select_provider"
+  },
+  "SESSDATA": {
+    "description": "B站 Cookie SESSDATA（/bili登录 扫码自动填入）",
+    "type": "string",
+    "default": ""
   },
   "BILI_JCT": {
-    "description": "B站 Cookie bili_jct（CSRF Token）",
+    "description": "B站 Cookie bili_jct（扫码自动填入）",
     "type": "string",
     "default": ""
   },
   "DEDE_USER_ID": {
-    "description": "Bot的B站UID（DedeUserID）",
+    "description": "Bot的B站UID（扫码自动填入）",
     "type": "string",
     "default": ""
   },
   "REFRESH_TOKEN": {
-    "description": "B站 refresh_token（用于Cookie自动刷新）",
+    "description": "B站 refresh_token（扫码自动填入）",
     "type": "string",
-    "default": "",
-    "hint": "登录时从 localStorage 的 ac_time_value 获取"
+    "default": ""
   },
   "OWNER_MID": {
     "description": "主人的B站UID（好感度特殊处理）",
@@ -27,12 +31,17 @@
     "default": ""
   },
   "OWNER_NAME": {
-    "description": "主人名称（用于提示词引用）",
+    "description": "主人名称（用于提示词）",
+    "type": "string",
+    "default": ""
+  },
+  "OWNER_BILI_NAME": {
+    "description": "主人的B站昵称（用于@推荐）",
     "type": "string",
     "default": ""
   },
   "EMBED_API_KEY": {
-    "description": "Embedding API Key",
+    "description": "Embedding API Key（记忆向量化用）",
     "type": "string",
     "default": ""
   },
@@ -46,22 +55,44 @@
     "type": "string",
     "default": "BAAI/bge-m3"
   },
+  "VIDEO_VISION_API_KEY": {
+    "description": "视频分析 视觉模型 API Key（分析视频封面+内容）",
+    "type": "string",
+    "default": "",
+    "hint": "留空则回退为纯文本LLM分析"
+  },
+  "VIDEO_VISION_API_BASE": {
+    "description": "视频分析 视觉模型 API Base URL",
+    "type": "string",
+    "default": "https://api.siliconflow.cn/v1"
+  },
+  "VIDEO_VISION_MODEL": {
+    "description": "视频分析 视觉模型名称",
+    "type": "string",
+    "default": "",
+    "hint": "如 google/gemma-3-27b-it、Pro/Qwen/Qwen2.5-VL-7B-Instruct 等"
+  },
+  "IMAGE_VISION_API_KEY": {
+    "description": "图片识别 视觉模型 API Key（识别评论中的图片）",
+    "type": "string",
+    "default": "",
+    "hint": "留空则不识别评论图片"
+  },
+  "IMAGE_VISION_API_BASE": {
+    "description": "图片识别 视觉模型 API Base URL",
+    "type": "string",
+    "default": "https://api.siliconflow.cn/v1"
+  },
+  "IMAGE_VISION_MODEL": {
+    "description": "图片识别 视觉模型名称",
+    "type": "string",
+    "default": "",
+    "hint": "如 google/gemma-3-27b-it 等"
+  },
   "ENABLE_REPLY": {
     "description": "启用评论自动回复",
     "type": "bool",
     "default": true
-  },
-  "ENABLE_PROACTIVE": {
-    "description": "启用主动看视频/评论",
-    "type": "bool",
-    "default": false,
-    "hint": "⚠️ 尚未实现，将在后续版本支持"
-  },
-  "ENABLE_DYNAMIC": {
-    "description": "启用自动发动态",
-    "type": "bool",
-    "default": false,
-    "hint": "⚠️ 尚未实现，将在后续版本支持"
   },
   "ENABLE_AFFECTION": {
     "description": "启用好感度系统",
@@ -72,6 +103,74 @@
     "description": "启用心情系统",
     "type": "bool",
     "default": true
+  },
+  "ENABLE_PERSONALITY_EVOLUTION": {
+    "description": "启用性格演化（每日反思）",
+    "type": "bool",
+    "default": true
+  },
+  "EVOLVE_HOUR": {
+    "description": "性格演化触发时间（0-23点）",
+    "type": "int",
+    "default": 1,
+    "hint": "建议设在休眠时段，如凌晨1点"
+  },
+  "ENABLE_PROACTIVE": {
+    "description": "启用主动看视频/评论",
+    "type": "bool",
+    "default": false
+  },
+  "PROACTIVE_VIDEO_COUNT": {
+    "description": "每天主动看几个视频",
+    "type": "int",
+    "default": 3
+  },
+  "PROACTIVE_COMMENT_COUNT": {
+    "description": "每天主动评论几条",
+    "type": "int",
+    "default": 2
+  },
+  "PROACTIVE_TIMES_COUNT": {
+    "description": "每天触发几次主动行为",
+    "type": "int",
+    "default": 2
+  },
+  "PROACTIVE_FOLLOW_UIDS": {
+    "description": "特别关注的UP主UID列表",
+    "type": "list",
+    "default": [],
+    "hint": "这些UP主的新视频会优先观看"
+  },
+  "PROACTIVE_LIKE": {
+    "description": "主动点赞（≥6分）",
+    "type": "bool",
+    "default": true
+  },
+  "PROACTIVE_COIN": {
+    "description": "主动投币（≥8分）",
+    "type": "bool",
+    "default": false
+  },
+  "PROACTIVE_FAV": {
+    "description": "主动收藏（≥8分）",
+    "type": "bool",
+    "default": true
+  },
+  "PROACTIVE_FOLLOW": {
+    "description": "主动关注UP主（≥9分）",
+    "type": "bool",
+    "default": true
+  },
+  "PROACTIVE_COMMENT": {
+    "description": "主动评论（≥7分）",
+    "type": "bool",
+    "default": true
+  },
+  "ENABLE_DYNAMIC": {
+    "description": "启用自动发动态",
+    "type": "bool",
+    "default": false,
+    "hint": "⚠️ 尚未实现，将在后续版本支持"
   },
   "POLL_INTERVAL": {
     "description": "评论轮询间隔（秒）",
@@ -84,24 +183,6 @@
     "type": "int",
     "default": 3
   },
-  "PROACTIVE_VIDEO_COUNT": {
-    "description": "每天主动看几个视频",
-    "type": "int",
-    "default": 3,
-    "hint": "⚠️ 尚未实现，将在后续版本支持"
-  },
-  "PROACTIVE_COMMENT_COUNT": {
-    "description": "每天主动评论几条",
-    "type": "int",
-    "default": 2,
-    "hint": "⚠️ 尚未实现，将在后续版本支持"
-  },
-  "PROACTIVE_TIMES_COUNT": {
-    "description": "每天触发几次主动行为",
-    "type": "int",
-    "default": 2,
-    "hint": "⚠️ 尚未实现，将在后续版本支持"
-  },
   "SLEEP_START": {
     "description": "休眠开始时间（0-23）",
     "type": "int",
@@ -111,42 +192,6 @@
     "description": "休眠结束时间（0-23）",
     "type": "int",
     "default": 8
-  },
-  "PROACTIVE_LIKE": {
-    "description": "主动点赞",
-    "type": "bool",
-    "default": false,
-    "hint": "⚠️ 尚未实现，将在后续版本支持"
-  },
-  "PROACTIVE_COIN": {
-    "description": "主动投币",
-    "type": "bool",
-    "default": false,
-    "hint": "⚠️ 尚未实现，将在后续版本支持"
-  },
-  "PROACTIVE_FAV": {
-    "description": "主动收藏",
-    "type": "bool",
-    "default": false,
-    "hint": "⚠️ 尚未实现，将在后续版本支持"
-  },
-  "PROACTIVE_FOLLOW": {
-    "description": "主动关注UP主",
-    "type": "bool",
-    "default": false,
-    "hint": "⚠️ 尚未实现，将在后续版本支持"
-  },
-  "PROACTIVE_COMMENT": {
-    "description": "主动评论",
-    "type": "bool",
-    "default": false,
-    "hint": "⚠️ 尚未实现，将在后续版本支持"
-  },
-  "PROACTIVE_FOLLOW_UIDS": {
-    "description": "特别关注的UP主UID列表（逗号分隔）",
-    "type": "string",
-    "default": "",
-    "hint": "⚠️ 尚未实现，将在后续版本支持"
   },
   "COOKIE_AUTO_REFRESH": {
     "description": "Cookie过期自动刷新",
@@ -164,7 +209,7 @@
     "default": true
   },
   "CUSTOM_SYSTEM_PROMPT": {
-    "description": "自定义系统提示词",
+    "description": "自定义系统提示词（USE_ASTRBOT_PERSONA关闭时使用）",
     "type": "text",
     "default": "你是一个B站UP主的AI助手，负责回复评论。"
   },
@@ -172,11 +217,5 @@
     "description": "回复最大token数",
     "type": "int",
     "default": 300
-  },
-  "LLM_PROVIDER_ID": {
-    "description": "选择用于回复/记忆压缩的LLM（留空用AstrBot默认）",
-    "type": "string",
-    "default": "",
-    "_special": "select_provider"
   }
 }
