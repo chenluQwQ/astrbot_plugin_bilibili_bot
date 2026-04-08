@@ -20,7 +20,14 @@ B站 AI Bot 插件 for [AstrBot](https://github.com/AstrBotDevs/AstrBot) — 让
 - 主动评论
 - 自动发动态
 - 性格演化
-- 记忆互通（QQ ↔ B站）
+
+## 🔗 QQ ↔ B站 记忆互通
+
+绑定后，两个平台的记忆会自动共享：
+
+1. 在 QQ 发送 `/bili绑定 <B站UID>` 完成绑定
+1. QQ 聊天中提到 B站 相关话题时，B站侧的永久记忆会自动注入
+1. QQ 的对话记录会存入记忆池（带 embedding），B站回复时通过语义检索按需调取相关的 QQ 记忆
 
 ## 📦 安装
 
@@ -69,6 +76,8 @@ git clone https://github.com/chenluQwQ/astrbot_plugin_bilibili_bot
 |`/bili拉黑 <UID>`|手动拉黑用户                 |
 |`/bili解黑 <UID>`|解除拉黑                   |
 |`/bili黑名单`     |查看黑名单                  |
+|`/bili绑定 <UID>`|绑定 QQ 与 B站 UID（记忆互通）   |
+|`/bili解绑`      |解除绑定                   |
 |`/bili帮助`      |查看帮助                   |
 
 ## 🏗️ 好感度等级
@@ -93,8 +102,8 @@ git clone https://github.com/chenluQwQ/astrbot_plugin_bilibili_bot
 
 - [问题反馈](https://github.com/chenluQwQ/astrbot_plugin_bilibili_bot/issues)
 
-## 🌟支持
-如果喜欢，请点个⭐️
+## 🌟 支持
+如果喜欢，请点一个⭐️吧。
 
 ## 📄 License
 
