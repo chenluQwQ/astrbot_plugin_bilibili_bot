@@ -13,13 +13,11 @@ B站 AI Bot 插件 for [AstrBot](https://github.com/AstrBotDevs/AstrBot) — 让
 - **视频上下文** — 自动获取视频信息，支持视觉模型分析封面
 - **图片识别** — 评论中的图片自动识别内容
 - **主动看视频** — 自动刷B站、评价视频、点赞/投币/收藏/关注/评论
+- **自动发动态** — 定时发布动态，支持 AI 生成配图
+- **Web 管理面板** — 浏览器管理记忆、好感度、动态日志等
 - **LLM 熔断保护** — 单条重试 3 次放弃，全局连续 5 次失败冷却 5 分钟
 - **Cookie 自动刷新** — 定期检查 + 自动刷新，支持扫码登录
 - **拉黑管理** — 手动/自动拉黑，黑名单用户不调 LLM 不花钱
-
-### 🚧 计划中
-
-- 自动发动态
 
 ## 🔗 QQ ↔ B站 记忆互通
 
@@ -53,18 +51,21 @@ git clone https://github.com/chenluQwQ/astrbot_plugin_bilibili_bot
 | `REFRESH_TOKEN` | 自动 | Cookie 自动刷新用（扫码自动填入） |
 | `OWNER_MID` | 推荐 | 主人的 B站 UID（好感度特殊处理） |
 | `OWNER_NAME` | 推荐 | 主人名称（用于 prompt） |
-| `OWNER_BILI_NAME` | 可选 | 主人B站昵称（主动推荐视频@用） |
 | `EMBED_API_KEY` | 可选 | Embedding API 密钥（记忆向量化用） |
 | `EMBED_API_BASE` | 可选 | Embedding API 地址，默认 SiliconFlow |
 | `EMBED_MODEL` | 可选 | Embedding 模型名，默认 `BAAI/bge-m3` |
 | `VIDEO_VISION_API_KEY` | 可选 | 视频分析视觉模型 API Key |
-| `VIDEO_VISION_API_BASE` | 可选 | 视频分析视觉模型 API 地址 |
-| `VIDEO_VISION_MODEL` | 可选 | 视频分析视觉模型名称 |
 | `IMAGE_VISION_API_KEY` | 可选 | 图片识别视觉模型 API Key |
-| `IMAGE_VISION_API_BASE` | 可选 | 图片识别视觉模型 API 地址 |
-| `IMAGE_VISION_MODEL` | 可选 | 图片识别视觉模型名称 |
+| `IMAGE_GEN_API_KEY` | 可选 | 图片生成 API Key（动态配图用） |
+| `IMAGE_GEN_MODEL` | 可选 | 图片生成模型，默认 `black-forest-labs/flux-schnell` |
+| `ENABLE_DYNAMIC` | 可选 | 启用自动发动态 |
+| `DYNAMIC_TIMES_COUNT` | 可选 | 每天触发几次动态发布 |
+| `DYNAMIC_DAILY_COUNT` | 可选 | 每天最多发几条动态 |
+| `ENABLE_WEB_PANEL` | 可选 | 启用 Web 管理面板 |
+| `WEB_PANEL_PORT` | 可选 | Web 面板端口，默认 5001 |
+| `WEB_PANEL_PASSWORD` | 可选 | Web 面板密码，默认 admin123 |
 
-> 💡 Cookie 获取方式：发送 `/bili登录` 扫码即可，登录后 Cookie 会自动定期刷新，无需手动维护。
+> 💡 Cookie 获取方式：发送 `/bili登录` 扫码即可，登录后 Cookie 会自动定期刷新。
 >
 > 💡 视觉模型留空时，视频分析回退为纯文本 LLM 分析，图片识别则跳过。
 
@@ -84,6 +85,11 @@ git clone https://github.com/chenluQwQ/astrbot_plugin_bilibili_bot
 | `/bili拉黑 <UID>` | 手动拉黑用户 |
 | `/bili解黑 <UID>` | 解除拉黑 |
 | `/bili黑名单` | 查看黑名单 |
+| `/bili性格` | 查看性格演化 |
+| `/bili日志` | 今日视频/评论日志 |
+| `/bili永久记忆` | 查看/删除永久记忆 |
+| `/bili动态` | 手动发动态 |
+| `/bili动态日志` | 动态记录 |
 | `/bili绑定 <UID>` | 绑定 QQ 与 B站 UID（记忆互通） |
 | `/bili解绑` | 解除绑定 |
 | `/bili帮助` | 查看帮助 |
@@ -101,16 +107,18 @@ git clone https://github.com/chenluQwQ/astrbot_plugin_bilibili_bot
 
 > 好感度 ≤ -30 或连续辱骂 5 次自动拉黑。
 
-## 🧠 记忆调取逻辑
+## 🌐 Web 管理面板
 
-每次回复时，按以下顺序注入上下文：
+启用 `ENABLE_WEB_PANEL` 后访问 `http://服务器IP:5001`
 
-1. **必定注入** — 人设、心情、节日、好感度等级语气、性格演化
-2. **永久记忆** — Bot 的自我认知（LLM 判断重要时存入）
-3. **用户画像** — 该 UID 的词条式档案
-4. **视频评论区** — 视频标题/简介/分区 + 视觉分析总结（有缓存用缓存）+ UP主印象（自己的视频跳过）
-5. **评论线上下文** — 同 thread 最近 10 条
-6. **语义记忆** — 优先该 UID 相关，再补全局相关
+功能：
+- 📊 状态概览
+- 🧠 记忆管理（分页/删除）
+- 💛 好感度排行
+- 💎 永久记忆管理
+- 🌱 性格演化查看
+- 📝 动态日志
+- 📦 数据导出
 
 ## 📁 数据存储
 
