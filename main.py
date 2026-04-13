@@ -75,7 +75,7 @@ DEFAULT_DYNAMIC_TOPICS = [
     "对某个互联网现象发表一句毒舌但精准的评价",
 ]
 
-@register("astrbot_plugin_bilibili_bot","chenluQwQ","B站 AI Bot — 自动回复评论、好感度、记忆、心情、用户画像、主动视频、性格演化、动态发布","1.1.0","https://github.com/chenluQwQ/astrbot_plugin_bilibili_bot")
+@register("astrbot_plugin_bilibili_bot","chenluQwQ","B站 AI Bot — 自动回复评论、好感度、记忆、心情、用户画像、主动视频、性格演化、动态发布","v1.1.0","https://github.com/chenluQwQ/astrbot_plugin_bilibili_bot")
 class BiliBiliBot(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
