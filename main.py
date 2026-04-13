@@ -1,5 +1,5 @@
 """
-AstrBot Plugin - Bilibili Bot v1.1.0
+AstrBot Plugin - Bilibili Bot 1.1.0
 自动回复评论、好感度、记忆、心情、用户画像、主动视频、动态发布、Web管理面板。
 """
 import io, os, re, time, json, math, random, asyncio, hashlib, base64, aiohttp, traceback
@@ -1379,7 +1379,7 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
         wl=self._load_json(WATCH_LOG_FILE,[]); today_watched=len([l for l in wl if l.get("time","").startswith(datetime.now().strftime("%Y-%m-%d"))])
         dl=self._load_json(DYNAMIC_LOG_FILE,[]); today_dynamic=len([l for l in dl if l.get("time","").startswith(datetime.now().strftime("%Y-%m-%d"))])
         lines = [
-            f"📺 BiliBot v1.1.0 状态","━━━━━━━━━━━━",f"🍪 {info}",
+            f"📺 BiliBot 1.1.0 状态","━━━━━━━━━━━━",f"🍪 {info}",
             f"{'🟢 运行中' if self._running else '🔴 未运行'}",
             f"🧠 记忆:{mc}条 | 💎永久:{pmc}条 | 👤档案:{pc}个",
             f"🎭 心情:{mood} | 🌱性格v{evo_ver}（{evo_last[:10]}）",
