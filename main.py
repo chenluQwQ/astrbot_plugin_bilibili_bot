@@ -53,7 +53,6 @@ from .core.config import (
     SCHEDULE_FILE,
     SECURITY_LOG_FILE,
     TEMP_IMAGE_DIR,
-    TEMP_VIDEO_DIR,
     THREAD_COMPRESS_THRESHOLD,
     USER_AGENT,
     USER_MEMORY_COMPRESS_THRESHOLD,
@@ -62,6 +61,8 @@ from .core.config import (
     VIDEO_MEMORY_FILE,
     WATCH_LOG_FILE,
 )
+
+TEMP_VIDEO_DIR = os.path.join(DATA_DIR, "temp_videos")
 
 
 _astrbot_site_packages = os.path.join(
