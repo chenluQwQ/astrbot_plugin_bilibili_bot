@@ -1,4 +1,4 @@
-# astrbot\_plugin\_bilibili\_bot
+# astrbot_plugin_bilibili_ai_bot
 
 B站 AI Bot 插件 for [AstrBot](https://github.com/AstrBotDevs/AstrBot) — 让你的 AI 角色在 B 站评论区"活"起来。
 
@@ -31,13 +31,13 @@ B站 AI Bot 插件 for [AstrBot](https://github.com/AstrBotDevs/AstrBot) — 让
 
 ## 📦 安装
 
-在 AstrBot WebUI 的插件市场搜索 `bilibili\\\_bot`，点击安装即可。
+在 AstrBot WebUI 的插件市场搜索 `bilibili_ai_bot`，点击安装即可。
 
 或手动安装：
 
 ```bash
 cd AstrBot/data/plugins
-git clone https://github.com/chenluQwQ/astrbot\\\_plugin\\\_bilibili\\\_bot
+git clone https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot
 ```
 
 ## ⚙️ 配置
@@ -46,29 +46,29 @@ git clone https://github.com/chenluQwQ/astrbot\\\_plugin\\\_bilibili\\\_bot
 
 |配置项|必填|说明|
 |-|-|-|
-|`LLM\\\_PROVIDER\\\_ID`|✅|选择用于回复的 LLM 模型|
+|`LLM_PROVIDER_ID`|✅|选择用于回复的 LLM 模型|
 |`SESSDATA`|自动|B站 Cookie（`/bili登录` 扫码自动填入）|
-|`BILI\\\_JCT`|自动|B站 CSRF Token（扫码自动填入）|
-|`DEDE\\\_USER\\\_ID`|自动|Bot 的 B站 UID（扫码自动填入）|
-|`REFRESH\\\_TOKEN`|自动|Cookie 自动刷新用（扫码自动填入）|
-|`OWNER\\\_MID`|推荐|主人的 B站 UID（好感度特殊处理）|
-|`OWNER\\\_NAME`|推荐|主人名称（用于 prompt）|
-|`EMBED\\\_API\\\_KEY`|可选|Embedding API 密钥（记忆向量化用）|
-|`EMBED\\\_API\\\_BASE`|可选|Embedding API 地址，默认 SiliconFlow|
-|`EMBED\\\_MODEL`|可选|Embedding 模型名，默认 `BAAI/bge-m3`|
-|`VIDEO\\\_VISION\\\_PROVIDER\\\_ID`|可选|视频分析走 AstrBot 模型提供商，留空则走独立 API|
-|`VIDEO\\\_VISION\\\_API\\\_KEY`|可选|视频分析视觉模型 API Key|
-|`IMAGE\\\_VISION\\\_PROVIDER\\\_ID`|可选|图片识别走 AstrBot 模型提供商，留空则走独立 API|
-|`IMAGE\\\_VISION\\\_API\\\_KEY`|可选|图片识别视觉模型 API Key|
-|`IMAGE\\\_GEN\\\_API\\\_KEY`|可选|图片生成 API Key（动态配图用）|
-|`IMAGE\\\_GEN\\\_MODEL`|可选|图片生成模型，默认 `black-forest-labs/flux-schnell`|
-|`EVOLVE\\\_MAX\\\_RETRIES`|可选|性格演化失败后的最大重试次数，默认 2|
-|`ENABLE\\\_DYNAMIC`|可选|启用自动发动态|
-|`DYNAMIC\\\_TIMES\\\_COUNT`|可选|每天触发几次动态发布|
-|`DYNAMIC\\\_DAILY\\\_COUNT`|可选|每天最多发几条动态|
-|`ENABLE\\\_WEB\\\_PANEL`|可选|启用 Web 管理面板|
-|`WEB\\\_PANEL\\\_PORT`|可选|Web 面板端口，默认 5001|
-|`WEB\\\_PANEL\\\_PASSWORD`|可选|Web 面板密码，默认 admin123|
+|`BILI_JCT`|自动|B站 CSRF Token（扫码自动填入）|
+|`DEDE_USER_ID`|自动|Bot 的 B站 UID（扫码自动填入）|
+|`REFRESH_TOKEN`|自动|Cookie 自动刷新用（扫码自动填入）|
+|`OWNER_MID`|推荐|主人的 B站 UID（好感度特殊处理）|
+|`OWNER_NAME`|推荐|主人名称（用于 prompt）|
+|`EMBED_API_KEY`|可选|Embedding API 密钥（记忆向量化用）|
+|`EMBED_API_BASE`|可选|Embedding API 地址，默认 SiliconFlow|
+|`EMBED_MODEL`|可选|Embedding 模型名，默认 `BAAI/bge-m3`|
+|`VIDEO_VISION_PROVIDER_ID`|可选|视频分析走 AstrBot 模型提供商，留空则走独立 API|
+|`VIDEO_VISION_API_KEY`|可选|视频分析视觉模型 API Key|
+|`IMAGE_VISION_PROVIDER_ID`|可选|图片识别走 AstrBot 模型提供商，留空则走独立 API|
+|`IMAGE_VISION_API_KEY`|可选|图片识别视觉模型 API Key|
+|`IMAGE_GEN_API_KEY`|可选|图片生成 API Key（动态配图用）|
+|`IMAGE_GEN_MODEL`|可选|图片生成模型，默认 `black-forest-labs/flux-schnell`|
+|`EVOLVE_MAX_RETRIES`|可选|性格演化失败后的最大重试次数，默认 2|
+|`ENABLE_DYNAMIC`|可选|启用自动发动态|
+|`DYNAMIC_TIMES_COUNT`|可选|每天触发几次动态发布|
+|`DYNAMIC_DAILY_COUNT`|可选|每天最多发几条动态|
+|`ENABLE_WEB_PANEL`|可选|启用 Web 管理面板|
+|`WEB_PANEL_PORT`|可选|Web 面板端口，默认 5001|
+|`WEB_PANEL_PASSWORD`|可选|Web 面板密码，默认 admin123|
 
 > 💡 Cookie 获取方式：发送 `/bili登录` 扫码即可，登录后 Cookie 会自动定期刷新。
 >
@@ -86,7 +86,7 @@ git clone https://github.com/chenluQwQ/astrbot\\\_plugin\\\_bilibili\\\_bot
 |`/bili开关 <功能>`|切换功能开关|
 |`/bili刷新`|手动刷新 Cookie|
 |`/bili记忆 <关键词>`|语义搜索记忆|
-|`/bili好感 \\\[UID]`|查看好感度排行/查询|
+|`/bili好感 [UID]`|查看好感度排行/查询|
 |`/bili拉黑 <UID>`|手动拉黑用户|
 |`/bili解黑 <UID>`|解除拉黑|
 |`/bili黑名单`|查看黑名单|
@@ -114,7 +114,7 @@ git clone https://github.com/chenluQwQ/astrbot\\\_plugin\\\_bilibili\\\_bot
 
 ## 🌐 Web 管理面板
 
-启用 `ENABLE\\\_WEB\\\_PANEL` 后访问 `http://服务器IP:5001`
+启用 `ENABLE_WEB_PANEL` 后访问 `http://服务器IP:5001`
 
 功能：
 
@@ -129,7 +129,7 @@ git clone https://github.com/chenluQwQ/astrbot\\\_plugin\\\_bilibili\\\_bot
 
 ## 📁 数据存储
 
-插件数据存储在 `data/plugin\\\_data/astrbot\\\_plugin\\\_bilibili\\\_bot/` 目录下，更新插件不会丢失数据。
+插件数据存储在 `data/plugin_data/astrbot_plugin_bilibili_ai_bot/` 目录下，更新插件不会丢失数据。
 
 ## 🔗 相关
 
