@@ -61,6 +61,12 @@
     "default": "",
     "hint": "留空则回退为纯文本LLM分析"
   },
+  "VIDEO_VISION_PROVIDER_ID": {
+    "description": "视频分析使用的 AstrBot 模型提供商（留空则使用独立 API 配置）",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider"
+  },
   "VIDEO_VISION_API_BASE": {
     "description": "视频分析 视觉模型 API Base URL",
     "type": "string",
@@ -77,6 +83,12 @@
     "type": "string",
     "default": "",
     "hint": "留空则不识别评论图片"
+  },
+  "IMAGE_VISION_PROVIDER_ID": {
+    "description": "图片识别使用的 AstrBot 模型提供商（留空则使用独立 API 配置）",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider"
   },
   "IMAGE_VISION_API_BASE": {
     "description": "图片识别 视觉模型 API Base URL",
@@ -131,6 +143,12 @@
     "type": "int",
     "default": 1,
     "hint": "建议设在休眠时段，如凌晨1点"
+  },
+  "EVOLVE_MAX_RETRIES": {
+    "description": "性格演化失败后的最大重试次数",
+    "type": "int",
+    "default": 2,
+    "hint": "默认失败 2 次后跳过当日演化"
   },
   "EVOLVE_PROMPT": {
     "description": "自定义性格演化提示词（留空用默认）",

@@ -41,6 +41,7 @@ class WebPanel:
         self.app.router.add_post('/api/permanent/delete', self.handle_permanent_delete)
         self.app.router.add_get('/api/personality', self.handle_personality)
         self.app.router.add_get('/api/dynamic/list', self.handle_dynamic_list)
+        self.app.router.add_get('/api/proactive/log', self.handle_proactive_log)
         self.app.router.add_get('/api/export', self.handle_export)
         
         self.runner = web.AppRunner(self.app)
@@ -92,6 +93,7 @@ class WebPanel:
         wl = p._load_json(WATCH_LOG_FILE, [])
         dl = p._load_json(DYNAMIC_LOG_FILE, [])
         today = datetime.now().strftime("%Y-%m-%d")
+        schedule = p._get_schedule_snapshot()
         return self._json_response({
             'running': p._running,
             'memory_count': len(memory),
@@ -101,6 +103,7 @@ class WebPanel:
             'personality_version': evo.get('version', 0),
             'today_watched': len([l for l in wl if l.get('time', '').startswith(today)]),
             'today_dynamic': len([l for l in dl if l.get('time', '').startswith(today)]),
+            'schedule': schedule,
             'features': {
                 'reply': p.config.get('ENABLE_REPLY', True),
                 'affection': p.config.get('ENABLE_AFFECTION', True),
@@ -209,6 +212,17 @@ class WebPanel:
         from .main import DYNAMIC_LOG_FILE
         log = self.plugin._load_json(DYNAMIC_LOG_FILE, [])
         return self._json_response({'items': log[-50:]})
+    
+    async def handle_proactive_log(self, request):
+        if not self._check_auth(request):
+            return self._json_response({'error': '未登录'}, 401)
+        from .main import WATCH_LOG_FILE, PROACTIVE_LOG_FILE, DYNAMIC_LOG_FILE, PROACTIVE_TRIGGER_LOG_FILE
+        return self._json_response({
+            'triggers': self.plugin._load_json(PROACTIVE_TRIGGER_LOG_FILE, [])[-50:],
+            'watch': self.plugin._load_json(WATCH_LOG_FILE, [])[-20:],
+            'comments': self.plugin._load_json(PROACTIVE_LOG_FILE, [])[-20:],
+            'dynamics': self.plugin._load_json(DYNAMIC_LOG_FILE, [])[-20:],
+        })
     
     async def handle_export(self, request):
         if not self._check_auth(request):
@@ -321,6 +335,10 @@ function showPanel(name) {
 async function loadAll() { loadStatus(); loadMemory(); loadAffection(); loadPermanent(); loadPersonality(); loadDynamic(); }
 async function loadStatus() {
   const r = await fetch('/api/status'); const d = await r.json();
+  const proactiveTimes = (d.schedule?.proactive_times || []).join(', ') || '未生成';
+  const dynamicTimes = (d.schedule?.dynamic_times || []).join(', ') || '未生成';
+  const proactiveTriggered = (d.schedule?.proactive_triggered || []).join(', ') || '暂无';
+  const dynamicTriggered = (d.schedule?.dynamic_triggered || []).join(', ') || '暂无';
   document.getElementById('statusDot').innerHTML = d.running ? '<span style="color:#2ecc71">🟢 运行中</span>' : '<span style="color:#e74c3c">🔴 未运行</span>';
   document.getElementById('panel-status').innerHTML = `
     <div class="card"><h3>📊 概览</h3><div class="stat-grid">
@@ -332,6 +350,14 @@ async function loadStatus() {
       <div class="stat"><div class="num">${d.today_watched}</div><div class="label">今日视频</div></div>
       <div class="stat"><div class="num">${d.today_dynamic}</div><div class="label">今日动态</div></div>
     </div></div>
+    <div class="card"><h3>🗓️ 今日计划</h3>
+      <div style="display:grid;gap:10px;font-size:13px;color:var(--text);">
+        <div><strong>主动看视频时间:</strong> <span style="color:var(--ice)">${proactiveTimes}</span></div>
+        <div><strong>已触发主动:</strong> <span style="color:var(--dim)">${proactiveTriggered}</span></div>
+        <div><strong>动态发布时间:</strong> <span style="color:var(--ice)">${dynamicTimes}</span></div>
+        <div><strong>已触发动态:</strong> <span style="color:var(--dim)">${dynamicTriggered}</span></div>
+      </div>
+    </div>
     <div class="card"><h3>⚙️ 功能开关</h3><div style="display:flex;flex-wrap:wrap;gap:10px;">
       ${Object.entries(d.features).map(([k,v])=>`<span class="tag">${k}: ${v?'✅':'❌'}</span>`).join('')}
     </div></div>`;
