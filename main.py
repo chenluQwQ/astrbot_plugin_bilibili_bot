@@ -374,8 +374,11 @@ class BiliBiliBot(Star):
             logger.error(f"[BiliBot] 图片识别失败: {e}"); return ""
 
     # ===== 好感度 =====
+    def _is_owner(self, mid):
+        owner = str(self.config.get("OWNER_MID", "") or "").strip()
+        return bool(owner) and str(mid).strip() == owner
     def _get_level(self, score, mid=None):
-        if str(mid)==str(self.config.get("OWNER_MID","")): return "special"
+        if mid and self._is_owner(mid): return "special"
         if score<=-10: return "cold"
         if score>=51: return "close"
         if score>=31: return "friend"
@@ -978,7 +981,7 @@ UP主：{video_info.get('owner_name','未知')}
     async def _generate_reply(self, content, mid, username, thread_id, oid, comment_type, image_desc=""):
         try:
             sp = self._get_system_prompt(); on = self.config.get("OWNER_NAME","") or "主人"
-            is_owner = str(mid)==str(self.config.get("OWNER_MID",""))
+            is_owner = self._is_owner(mid)
             cs = self._affection.get(str(mid),0); lv = self._get_level(cs, mid)
             lp = self._get_level_prompts()[lv]
             clean_content, is_suspicious, reason = self._sanitize_user_input(content, username, mid)
@@ -2140,7 +2143,7 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
         if len(parts)<2: yield event.plain_result("用法: /bili拉黑 <UID>"); return
         uid=parts[1].strip()
         if not uid.isdigit(): yield event.plain_result("❌ UID必须是数字"); return
-        if uid==str(self.config.get("OWNER_MID","")): yield event.plain_result("❌ 不能拉黑主人！"); return
+        if self._is_owner(uid): yield event.plain_result("❌ 不能拉黑主人！"); return
         success = await self._block_user(int(uid))
         bl = self._load_json(os.path.join(DATA_DIR,"block_log.json"),{})
         bl[uid] = {"username":"手动拉黑","reason":"手动拉黑","time":datetime.now().strftime("%Y-%m-%d %H:%M")}
@@ -2534,7 +2537,7 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
         uf = result.get("user_facts", [])
         pm = result.get("permanent_memory", "")
         if self.config.get("ENABLE_AFFECTION", True):
-            mx = 100 if str(mid) == str(self.config.get("OWNER_MID", "")) else 99
+            mx = 100 if self._is_owner(mid) else 99
             ns = max(0, min(mx, cs + sd))
             self._affection[str(mid)] = ns
             self._save_json(AFFECTION_FILE, self._affection)
@@ -2558,7 +2561,7 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
                 if mid in bc:
                     bc[mid] = 0
                     self._save_json(os.path.join(DATA_DIR, "block_count.json"), bc)
-            if should_block and str(mid) != str(self.config.get("OWNER_MID", "")):
+            if should_block and not self._is_owner(mid):
                 await self._send_reply(oid, rpid, comment_type, "我不想和你说话了。")
                 await self._block_user(int(mid))
                 logger.info(f"[BiliBot] 🚫 拉黑 {username}")
@@ -2661,6 +2664,8 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
             items = d.get("data", {}).get("items", [])
             if not items:
                 return
+            # 加载回复通知的已处理集合，共享去重
+            replied = set(self._load_json(REPLIED_FILE, []))
             for item in items:
                 at_id = str(item.get("id", ""))
                 if not at_id or at_id in self._replied_at:
@@ -2678,6 +2683,11 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
                 rpid = str(source.get("source_id", ""))
                 comment_type = source.get("business_id", 1)
                 thread_id = str(source.get("root_id") or rpid or at_id)
+                # 如果回复轮询已经处理过这条rpid，跳过
+                if rpid and rpid in replied:
+                    self._replied_at.add(at_id)
+                    self._save_json(REPLIED_AT_FILE, list(self._replied_at))
+                    continue
                 logger.info(f"[BiliBot] 📣 @{username}: {content[:50]}")
                 result = await self._generate_reply(content, mid, username, thread_id, oid, comment_type)
                 if result and result.get("reply") and oid and rpid:
@@ -2691,6 +2701,9 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
                         thread_id=thread_id,
                         result=result,
                     )
+                    # 也写入replied，防止回复轮询再处理
+                    replied.add(rpid)
+                    self._save_json(REPLIED_FILE, list(replied))
                 self._replied_at.add(at_id)
                 self._save_json(REPLIED_AT_FILE, list(self._replied_at))
         except Exception as e:
