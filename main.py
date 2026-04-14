@@ -83,7 +83,7 @@ class BiliBiliBot(Star):
         self._first_poll = not os.path.exists(REPLIED_FILE)
         self._replied_at = set(self._load_json(REPLIED_AT_FILE, []))
         self._affection = self._load_json(AFFECTION_FILE, {})
-        self._memory = self._load_json(MEMORY_FILE, [])
+        self._memory = [self._normalize_memory_entry(m) for m in self._load_json(MEMORY_FILE, []) if isinstance(m, dict)]
         self._embed_client = None
         self._video_vision_client = None
         self._image_vision_client = None
@@ -122,6 +122,36 @@ class BiliBiliBot(Star):
         return default
     def _save_json(self, path, data):
         with open(path,"w",encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=2)
+    def _normalize_memory_entry(self, record):
+        rec = dict(record)
+        if rec.get("memory_type"):
+            return rec
+        thread_id = str(rec.get("thread_id", ""))
+        text = str(rec.get("text", ""))
+        if thread_id == "dynamic" or "Bot发了一条动态" in text:
+            rec["memory_type"] = "dynamic"
+        elif thread_id.startswith("video:") or thread_id == "proactive_watch" or "Bot看了视频" in text or "视频分析记忆" in text:
+            rec["memory_type"] = "video"
+        elif text.startswith("[记忆压缩]"):
+            rec["memory_type"] = "user_summary"
+        else:
+            rec["memory_type"] = "chat"
+        return rec
+    def _save_memory_entry(self, record):
+        self._memory.append(self._normalize_memory_entry(record))
+        self._save_json(MEMORY_FILE, self._memory)
+    @staticmethod
+    def _memory_type_label(memory_type):
+        return {
+            "chat": "交流",
+            "video": "视频",
+            "dynamic": "动态",
+            "user_summary": "用户总结",
+        }.get(memory_type, memory_type)
+    def _match_memory_type(self, memory, memory_types=None):
+        if not memory_types:
+            return True
+        return self._normalize_memory_entry(memory).get("memory_type") in set(memory_types)
 
     async def _http_get(self, url, headers=None, params=None, timeout=10):
         async with aiohttp.ClientSession() as s:
@@ -453,30 +483,37 @@ class BiliBiliBot(Star):
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         text = f"[{now}] 用户{user_id}({username})说：{content} | Bot回复：{reply_text}"
         emb = self._get_embedding(text)
-        rec = {"rpid":str(rpid),"thread_id":str(thread_id),"user_id":str(user_id),"time":now,"text":text,"source":source}
+        rec = {"rpid":str(rpid),"thread_id":str(thread_id),"user_id":str(user_id),"username":username,"time":now,"text":text,"source":source,"memory_type":"chat"}
         if emb: rec["embedding"]=emb
-        self._memory.append(rec); self._save_json(MEMORY_FILE, self._memory)
-    def _save_self_memory_record(self, thread_id, text, source="bilibili"):
+        self._save_memory_entry(rec)
+    def _save_self_memory_record(self, thread_id, text, source="bilibili", memory_type="chat", user_id="self", extra=None):
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         rec = {
             "rpid": f"{thread_id}_{int(datetime.now().timestamp())}",
             "thread_id": str(thread_id),
-            "user_id": "self",
+            "user_id": str(user_id),
             "time": now,
             "text": text,
             "source": source,
+            "memory_type": memory_type,
         }
+        if extra:
+            rec.update(extra)
         emb = self._get_embedding(text)
         if emb:
             rec["embedding"] = emb
-        self._memory.append(rec)
-        self._save_json(MEMORY_FILE, self._memory)
+        self._save_memory_entry(rec)
     def _get_thread_memories(self, thread_id):
-        docs = [m for m in self._memory if m.get("thread_id")==str(thread_id)]
+        docs = [m for m in self._memory if m.get("thread_id")==str(thread_id) and self._match_memory_type(m, {"chat"})]
         docs.sort(key=lambda x:x.get("time",""))
         return [m["text"] for m in docs]
-    def _get_user_semantic_memories(self, user_id, query_text):
-        um = [m for m in self._memory if m.get("user_id")==str(user_id) and not m.get("text","").startswith("[记忆压缩]") and "embedding" in m]
+    def _get_user_semantic_memories(self, user_id, query_text, memory_types=None):
+        um = [
+            m for m in self._memory
+            if m.get("user_id")==str(user_id)
+            and "embedding" in m
+            and self._match_memory_type(m, memory_types or {"chat", "user_summary"})
+        ]
         # 也搜QQ记忆
         qq_mem = self._load_json(QQ_MEMORY_FILE, [])
         um += [m for m in qq_mem if m.get("user_id")==str(user_id) and "embedding" in m]
@@ -486,13 +523,16 @@ class BiliBiliBot(Star):
         scored = [(self._cosine_similarity(qe, m["embedding"]), m["text"]) for m in um]
         scored.sort(reverse=True)
         return [t for s,t in scored[:MAX_SEMANTIC_RESULTS] if s>0.6]
-    def _search_memories(self, query_text, limit=5, source=None):
+    def _search_memories(self, query_text, limit=5, source=None, memory_types=None, user_id=None):
         cands = list(self._memory)
         # 合并QQ记忆
         if source != "bilibili":
             qq_mem = self._load_json(QQ_MEMORY_FILE, [])
             cands += qq_mem
         if source: cands = [m for m in cands if m.get("source")==source]
+        if user_id is not None:
+            cands = [m for m in cands if m.get("user_id")==str(user_id)]
+        cands = [self._normalize_memory_entry(m) for m in cands if self._match_memory_type(m, memory_types)]
         cands = [m for m in cands if "embedding" in m]
         if not cands: return []
         qe = self._get_embedding(query_text)
@@ -503,10 +543,11 @@ class BiliBiliBot(Star):
         for s,m in scored[:limit]:
             if s>0.5:
                 tag = f"[{m.get('source','?')}]" if not source else ""
-                results.append(f"{tag}{m['text']}")
+                type_tag = f"[{self._memory_type_label(m.get('memory_type', '?'))}]"
+                results.append(f"{tag}{type_tag}{m['text']}")
         return results
     async def _compress_user_memory(self, user_id, username):
-        um = [m for m in self._memory if m.get("user_id")==str(user_id)]
+        um = [m for m in self._memory if m.get("user_id")==str(user_id) and self._match_memory_type(m, {"chat"})]
         if len(um) <= USER_MEMORY_COMPRESS_THRESHOLD: return
         logger.info(f"[BiliBot] 🗜️ {username} 记忆达 {len(um)} 条，压缩...")
         um.sort(key=lambda x:x.get("time","")); old = um[:-USER_MEMORY_KEEP_RECENT]
@@ -523,11 +564,11 @@ class BiliBiliBot(Star):
             self._update_user_profile(user_id, impression=result.get("summary") or None, new_facts=result.get("user_facts") or None, new_tags=result.get("tags") or None)
             now = datetime.now().strftime("%Y-%m-%d %H:%M")
             emb = self._get_embedding(result.get("summary",""))
-            comp = {"rpid":f"compressed_{int(datetime.now().timestamp())}","thread_id":"compressed","user_id":str(user_id),"time":now,"text":f"[记忆压缩] {result.get('summary','')}","source":"bilibili"}
+            comp = {"rpid":f"compressed_{int(datetime.now().timestamp())}","thread_id":"compressed","user_id":str(user_id),"time":now,"text":f"[记忆压缩] {result.get('summary','')}","source":"bilibili","memory_type":"user_summary"}
             if emb: comp["embedding"]=emb
             old_rpids = {m["rpid"] for m in old}
             self._memory = [m for m in self._memory if m.get("rpid") not in old_rpids]
-            self._memory.append(comp); self._save_json(MEMORY_FILE, self._memory)
+            self._save_memory_entry(comp)
             logger.info(f"[BiliBot] 🗜️ 压缩完成：{len(old)} 条 → 1 条")
         except Exception as e: logger.error(f"[BiliBot] 记忆压缩失败：{e}")
     async def _build_memory_context(self, thread_id, user_id, query_text, oid=0, comment_type=1):
@@ -564,9 +605,12 @@ class BiliBiliBot(Star):
                     if up_profile:
                         parts.append(up_profile.replace("【对该用户的了解】","【该视频UP主的了解】"))
                     # UP主相关语义记忆
-                    up_mems = self._get_user_semantic_memories(up_mid, query_text)
+                    up_mems = self._get_user_semantic_memories(up_mid, query_text, memory_types={"chat", "user_summary"})
                     if up_mems:
                         parts.append("【与该UP主的历史互动】\n" + "\n".join(up_mems))
+            related_video_mems = self._search_memories(query_text, limit=2, source="bilibili", memory_types={"video"})
+            if related_video_mems:
+                parts.append("【相关视频记忆】\n" + "\n".join(related_video_mems))
 
         # 4. 评论线上下文（最近10条）
         td = self._get_thread_memories(thread_id)
@@ -574,12 +618,12 @@ class BiliBiliBot(Star):
             parts.append("【本评论线对话】\n" + "\n".join(td[-10:]))
 
         # 5. 用户语义记忆（优先该UID相关）
-        user_mems = self._get_user_semantic_memories(user_id, query_text)
+        user_mems = self._get_user_semantic_memories(user_id, query_text, memory_types={"chat", "user_summary"})
         if user_mems:
             parts.append("【与该用户的相关记忆】\n" + "\n".join(user_mems))
         else:
             # 没有该用户的记忆，搜全局相关
-            general_mems = self._search_memories(query_text, limit=3)
+            general_mems = self._search_memories(query_text, limit=3, memory_types={"chat", "video", "dynamic", "user_summary"})
             if general_mems:
                 parts.append("【相关历史记忆】\n" + "\n".join(general_mems))
 
@@ -644,8 +688,20 @@ UP主：{video_info.get('owner_name','未知')}
         logger.info(f"[BiliBot] 📹 新视频，分析中：《{vi['title']}》by {vi['owner_name']}")
         analysis = await self._analyze_video_with_vision(vi)
         logger.info(f"[BiliBot] 📹 分析结果：{analysis[:60]}...")
-        cache_entry = {"title":vi["title"],"desc":vi.get("desc","")[:200],"owner_name":vi["owner_name"],"owner_mid":str(vi["owner_mid"]),"tname":vi["tname"],"analysis":analysis,"time":datetime.now().strftime("%Y-%m-%d %H:%M")}
+        analyzed_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+        cache_entry = {"bvid":bvid,"title":vi["title"],"desc":vi.get("desc","")[:200],"owner_name":vi["owner_name"],"owner_mid":str(vi["owner_mid"]),"tname":vi["tname"],"analysis":analysis,"time":analyzed_at}
         vc[bvid] = cache_entry; self._save_json(VIDEO_MEMORY_FILE, vc)
+        memory_text = (
+            f"[{analyzed_at}] 视频分析记忆：标题《{vi['title']}》 "
+            f"UP主:{vi['owner_name']} 分区:{vi['tname']} "
+            f"简介:{vi.get('desc','')[:120]} 内容概括:{analysis[:200]}"
+        )
+        self._save_self_memory_record(
+            f"video:{bvid}",
+            memory_text,
+            memory_type="video",
+            extra={"bvid": bvid, "owner_mid": str(vi["owner_mid"]), "video_title": vi["title"]},
+        )
         ctx = f"【当前视频】\n标题：{vi['title']}\nUP主：{vi['owner_name']}（UID:{vi['owner_mid']}）\n分区：{vi['tname']}\n简介：{vi.get('desc','')[:150]}\n内容概括：{analysis}"
         return ctx, cache_entry
 
@@ -1061,8 +1117,7 @@ UP主：{video_info.get('owner_name','未知')}
             self._save_json(DYNAMIC_LOG_FILE, log[-100:])
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
             short_text = text[:60] if len(text) > 60 else text
-            self._memory.append({"rpid": f"dynamic_{int(time.time())}", "thread_id": "dynamic", "user_id": "self", "time": now_str, "text": f"[{now_str}] Bot发了一条动态：{short_text}", "source": "bilibili"})
-            self._save_json(MEMORY_FILE, self._memory)
+            self._save_memory_entry({"rpid": f"dynamic_{int(time.time())}", "thread_id": "dynamic", "user_id": "self", "time": now_str, "text": f"[{now_str}] Bot发了一条动态：{short_text}", "source": "bilibili", "memory_type": "dynamic"})
             logger.info("[BiliBot] 🎉 动态发布完成！")
         else:
             logger.error("[BiliBot] ❌ 动态发布失败")
@@ -1431,7 +1486,7 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
                 f"感想:{review[:80]} "
                 f"内容:{video_description[:120]}"
             )
-            self._save_self_memory_record("proactive_watch", memory_text)
+            self._save_self_memory_record("proactive_watch", memory_text, memory_type="video", extra={"bvid": bvid, "owner_mid": str(video.get("up_mid","")), "video_title": video.get("title","")})
             # 存入外部记忆
             if bvid not in external_memory:
                 external_memory[bvid] = {"title": video.get("title",""), "up_name": video.get("up_name",""), "up_mid": str(video.get("up_mid","")), "description": video_description, "score": score, "mood": mood, "review": review, "watched_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "comments": []}
@@ -1537,6 +1592,29 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
         })
         self._save_json(PROACTIVE_TRIGGER_LOG_FILE, trigger_log[-200:])
         yield event.plain_result("🎯 已手动触发一次主动看视频")
+    @filter.llm_tool(name="bili_watch_videos")
+    async def tool_bili_watch_videos(self, event: AstrMessageEvent) -> str:
+        """触发一次主动看B站视频流程。
+
+        Args:
+            noop(boolean): 占位参数，可忽略
+        """
+        if not self._has_cookie():
+            return "未登录B站，无法执行主动看视频。请先使用 /bili登录 完成扫码登录。"
+        if not self.config.get("ENABLE_PROACTIVE", False):
+            return "主动看视频功能当前未开启。请先使用 /bili开关 主动 开启。"
+        if self._proactive_task is not None and not self._proactive_task.done():
+            return "已有主动看视频任务正在运行，无需重复触发。"
+        self._proactive_task = asyncio.create_task(self._run_proactive())
+        trigger_log = self._load_json(PROACTIVE_TRIGGER_LOG_FILE, [])
+        trigger_log.append({
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "type": "llm_tool",
+            "scheduled": "bili_watch_videos",
+            "status": "triggered",
+        })
+        self._save_json(PROACTIVE_TRIGGER_LOG_FILE, trigger_log[-200:])
+        return "已在后台触发一次主动看B站视频流程。稍后可用 /bili日志 查看结果。"
     @filter.command("bili开关")
     async def cmd_toggle(self, event: AstrMessageEvent):
         parts = event.message_str.strip().split(maxsplit=1)
@@ -1556,16 +1634,84 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
     @filter.command("bili记忆")
     async def cmd_memory(self, event: AstrMessageEvent):
         parts = event.message_str.strip().split(maxsplit=2)
+        type_alias = {
+            "交流": {"chat"},
+            "聊天": {"chat"},
+            "评论": {"chat"},
+            "视频": {"video"},
+            "观影": {"video"},
+            "动态": {"dynamic"},
+            "总结": {"user_summary"},
+            "压缩": {"user_summary"},
+        }
         if len(parts)<2:
             mc=len(self._memory); bc=len([m for m in self._memory if m.get("source")=="bilibili"]); qc=len([m for m in self._memory if m.get("source")=="qq"])
-            yield event.plain_result(f"🧠 记忆统计\n总计:{mc} | B站:{bc} | QQ:{qc}\n\n用法: /bili记忆 <关键词>\n/bili记忆 关键词 qq ← 只搜QQ"); return
-        query=parts[1]; source=parts[2] if len(parts)>2 else None
-        if source=="all": source=None
-        results = self._search_memories(query, limit=5, source=source)
+            chat_count = len([m for m in self._memory if self._match_memory_type(m, {"chat"})])
+            video_count = len([m for m in self._memory if self._match_memory_type(m, {"video"})])
+            dynamic_count = len([m for m in self._memory if self._match_memory_type(m, {"dynamic"})])
+            user_summary_count = len([m for m in self._memory if self._match_memory_type(m, {"user_summary"})])
+            yield event.plain_result(
+                "🧠 记忆统计\n"
+                f"总计:{mc} | B站:{bc} | QQ:{qc}\n"
+                f"交流:{chat_count} | 视频:{video_count} | 动态:{dynamic_count} | 用户总结:{user_summary_count}\n\n"
+                "用法:\n"
+                "/bili记忆 <关键词>\n"
+                "/bili记忆 <关键词> qq ← 只搜QQ\n"
+                "/bili记忆 <关键词> 视频 ← 只搜视频记忆\n"
+                "/bili记忆 <关键词> 动态 ← 只搜动态记忆\n"
+                "/bili记忆 <关键词> 交流 ← 只搜交流记忆"
+            ); return
+        query=parts[1]
+        arg=parts[2] if len(parts)>2 else None
+        source = None
+        memory_types = None
+        if arg:
+            if arg == "all":
+                source = None
+            elif arg in ("qq", "bilibili"):
+                source = arg
+            elif arg in type_alias:
+                memory_types = type_alias[arg]
+            else:
+                source = arg
+        results = self._search_memories(query, limit=5, source=source, memory_types=memory_types)
         if not results: yield event.plain_result(f"🧠 没找到「{query}」的记忆"); return
-        lines = [f"🧠 关于「{query}」的记忆：",""]
+        suffix = f"（{arg}）" if arg else ""
+        lines = [f"🧠 关于「{query}」的记忆{suffix}：",""]
         for i,r in enumerate(results,1): lines.append(f"{i}. {r[:150]+'...' if len(r)>150 else r}")
         yield event.plain_result("\n".join(lines))
+    @filter.llm_tool(name="bili_search_memory")
+    async def tool_bili_search_memory(self, event: AstrMessageEvent, query: str, memory_type: str = "", source: str = "") -> str:
+        """搜索插件记忆。
+
+        Args:
+            query(string): 要搜索的关键词或问题
+            memory_type(string): 记忆类型，可选 chat/video/dynamic/user_summary 或 交流/视频/动态/总结
+            source(string): 记忆来源，可选 bilibili/qq/all
+        """
+        type_alias = {
+            "chat": {"chat"},
+            "交流": {"chat"},
+            "聊天": {"chat"},
+            "评论": {"chat"},
+            "video": {"video"},
+            "视频": {"video"},
+            "观影": {"video"},
+            "dynamic": {"dynamic"},
+            "动态": {"dynamic"},
+            "user_summary": {"user_summary"},
+            "summary": {"user_summary"},
+            "总结": {"user_summary"},
+            "压缩": {"user_summary"},
+        }
+        selected_types = type_alias.get(memory_type.strip(), None) if memory_type else None
+        selected_source = source.strip() or None
+        if selected_source == "all":
+            selected_source = None
+        results = self._search_memories(query, limit=5, source=selected_source, memory_types=selected_types)
+        if not results:
+            return f"没有找到与「{query}」相关的记忆。"
+        return "\n".join([f"{i}. {r}" for i, r in enumerate(results, 1)])
     @filter.command("bili好感")
     async def cmd_affection(self, event: AstrMessageEvent):
         parts = event.message_str.strip().split(maxsplit=1)
