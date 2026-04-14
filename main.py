@@ -85,6 +85,7 @@ class BiliBiliBot(Star):
         self._first_poll = not os.path.exists(REPLIED_FILE)
         self._replied_at = set(self._load_json(REPLIED_AT_FILE, []))
         self._affection = self._load_json(AFFECTION_FILE, {})
+        self._ensure_owner_affection()
         self._memory = [self._normalize_memory_entry(m) for m in self._load_json(MEMORY_FILE, []) if isinstance(m, dict)]
         self._embed_client = None
         self._video_vision_client = None
@@ -136,6 +137,16 @@ class BiliBiliBot(Star):
         return default
     def _save_json(self, path, data):
         with open(path,"w",encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=2)
+    def _reply_dedup_key(self, oid, comment_type, rpid):
+        return f"{comment_type}:{oid}:{rpid}"
+    def _ensure_owner_affection(self):
+        owner = str(self.config.get("OWNER_MID", "") or "").strip()
+        if not owner:
+            return
+        current = int(self._affection.get(owner, 0) or 0)
+        if current < 100:
+            self._affection[owner] = 100
+            self._save_json(AFFECTION_FILE, self._affection)
     def _find_command(self, command_name):
         return shutil.which(command_name)
     def _get_environment_status(self):
@@ -966,7 +977,7 @@ UP主：{video_info.get('owner_name','未知')}
         try:
             pid = provider_id if provider_id is not None else self.config.get("LLM_PROVIDER_ID","")
             full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
-            kwargs = {"prompt": full_prompt}
+            kwargs = {"prompt": full_prompt, "max_tokens": max_tokens}
             if pid:
                 kwargs["chat_provider_id"] = pid
             resp = await self.context.llm_generate(**kwargs)
@@ -982,6 +993,8 @@ UP主：{video_info.get('owner_name','未知')}
     async def _generate_reply(self, content, mid, username, thread_id, oid, comment_type, image_desc=""):
         try:
             sp = self._get_system_prompt(); on = self.config.get("OWNER_NAME","") or "主人"
+            if self._is_owner(mid):
+                self._ensure_owner_affection()
             is_owner = self._is_owner(mid)
             cs = self._affection.get(str(mid),0); lv = self._get_level(cs, mid)
             lp = self._get_level_prompts()[lv]
@@ -2532,9 +2545,9 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
             ok,msg=await self.refresh_cookie(); logger.info(f"[BiliBot] 刷新{'成功' if ok else '失败'}: {msg}")
     async def _apply_reply_result(self, *, mid, username, content, oid, rpid, comment_type, thread_id, result):
         # 内存级去重：防止两个轮询对同一条评论重复回复
-        dedup_key = str(rpid)
+        dedup_key = self._reply_dedup_key(oid, comment_type, rpid)
         if dedup_key in self._processed_comments:
-            logger.info(f"[BiliBot] ⏭️ rpid={rpid} 已处理过，跳过重复回复")
+            logger.info(f"[BiliBot] ⏭️ {dedup_key} 已处理过，跳过重复回复")
             return False
         self._processed_comments.add(dedup_key)
         # 防止集合无限增长
@@ -2547,6 +2560,8 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
         uf = result.get("user_facts", [])
         pm = result.get("permanent_memory", "")
         if self.config.get("ENABLE_AFFECTION", True):
+            if self._is_owner(mid):
+                cs = max(cs, 100)
             mx = 100 if self._is_owner(mid) else 99
             ns = max(0, min(mx, cs + sd))
             self._affection[str(mid)] = ns
@@ -2604,26 +2619,32 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
             replied=set(self._load_json(REPLIED_FILE,[]))
             if self._first_poll:
                 for item in items:
-                    rpid=str(item.get("item",{}).get("source_id",""))
-                    if rpid: replied.add(rpid)
+                    r = item.get("item", {})
+                    rpid=str(r.get("source_id",""))
+                    oid=r.get("subject_id",0)
+                    ct=r.get("business_id",1)
+                    if rpid: replied.add(self._reply_dedup_key(oid, ct, rpid))
                 self._save_json(REPLIED_FILE,list(replied)); self._first_poll=False
                 logger.info(f"[BiliBot] 首次运行，标记 {len(items)} 条已读"); return
             count=0; mr=self.config.get("MAX_REPLIES_PER_RUN",3)
             for item in items:
                 if count>=mr: break
                 r=item.get("item",{}); rpid=str(r.get("source_id",""))
-                if rpid in replied or rpid in self._processed_comments: continue
                 mid=str(item.get("user",{}).get("mid","")); username=item.get("user",{}).get("nickname","")
                 content=r.get("source_content",""); oid=r.get("subject_id",0); ct=r.get("business_id",1)
+                dedup_key = self._reply_dedup_key(oid, ct, rpid)
+                if dedup_key in replied or dedup_key in self._processed_comments: continue
                 thread_id=str(r.get("root_id") or rpid)
                 if not content or not rpid: continue
+                if str(mid).strip() == str(self.config.get("DEDE_USER_ID","")).strip():
+                    replied.add(dedup_key); self._save_json(REPLIED_FILE,list(replied)); continue
                 # 拉黑用户跳过（不调LLM不花钱）
                 bl = self._load_json(os.path.join(DATA_DIR,"block_log.json"),{})
                 if mid in bl:
-                    replied.add(rpid); self._save_json(REPLIED_FILE,list(replied)); continue
+                    replied.add(dedup_key); self._save_json(REPLIED_FILE,list(replied)); continue
                 if self._is_blocked(content):
                     self._log_security_event("keyword_blocked",mid,username,content,"关键词过滤")
-                    replied.add(rpid); self._save_json(REPLIED_FILE,list(replied)); continue
+                    replied.add(dedup_key); self._save_json(REPLIED_FILE,list(replied)); continue
                 cs=self._affection.get(str(mid),0); lv=self._get_level(cs,mid)
                 logger.info(f"[BiliBot] 📩 {username}（{LEVEL_NAMES[lv]}|{cs}分）：{content[:50]}")
                 # 检测评论中的图片
@@ -2639,7 +2660,7 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
                     self._consecutive_llm_failures += 1
                     if self._retry_counts[rpid] >= 3:
                         logger.warning(f"[BiliBot] {username} 重试3次仍失败，放弃")
-                        replied.add(rpid); self._save_json(REPLIED_FILE,list(replied))
+                        replied.add(dedup_key); self._save_json(REPLIED_FILE,list(replied))
                         self._retry_counts.pop(rpid, None)
                     else:
                         logger.warning(f"[BiliBot] {username} 第{self._retry_counts[rpid]}次失败，下轮重试")
@@ -2662,7 +2683,7 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
                 )
                 if success:
                     count += 1
-                replied.add(rpid); self._save_json(REPLIED_FILE,list(replied))
+                replied.add(dedup_key); self._save_json(REPLIED_FILE,list(replied))
         except Exception as e: logger.error(f"[BiliBot] 轮询出错: {e}\n{traceback.format_exc()}")
     async def _poll_at_and_reply(self):
         if time.time() < self._llm_cooldown_until:
@@ -2692,9 +2713,14 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
                 oid = source.get("subject_id", 0)
                 rpid = str(source.get("source_id", ""))
                 comment_type = source.get("business_id", 1)
+                dedup_key = self._reply_dedup_key(oid, comment_type, rpid)
                 thread_id = str(source.get("root_id") or rpid or at_id)
                 # 如果回复轮询已经处理过这条rpid，跳过
-                if rpid and (rpid in replied or rpid in self._processed_comments):
+                if rpid and (dedup_key in replied or dedup_key in self._processed_comments):
+                    self._replied_at.add(at_id)
+                    self._save_json(REPLIED_AT_FILE, list(self._replied_at))
+                    continue
+                if str(mid).strip() == str(self.config.get("DEDE_USER_ID","")).strip():
                     self._replied_at.add(at_id)
                     self._save_json(REPLIED_AT_FILE, list(self._replied_at))
                     continue
@@ -2712,7 +2738,7 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
                         result=result,
                     )
                     # 也写入replied，防止回复轮询再处理
-                    replied.add(rpid)
+                    replied.add(dedup_key)
                     self._save_json(REPLIED_FILE, list(replied))
                 self._replied_at.add(at_id)
                 self._save_json(REPLIED_AT_FILE, list(self._replied_at))
