@@ -24,6 +24,7 @@ WATCH_LOG_FILE = os.path.join(DATA_DIR, "watch_log.json")
 DYNAMIC_LOG_FILE = os.path.join(DATA_DIR, "dynamic_log.json")
 DYNAMIC_SCHEDULE_FILE = os.path.join(DATA_DIR, "dynamic_schedule.json")
 TEMP_IMAGE_DIR = os.path.join(DATA_DIR, "temp_images")
+TEMP_VIDEO_DIR = os.path.join(DATA_DIR, "temp_videos")
 REPLIED_AT_FILE = os.path.join(DATA_DIR, "replied_at.json")
 PROACTIVE_TRIGGER_LOG_FILE = os.path.join(DATA_DIR, "proactive_trigger_log.json")
 

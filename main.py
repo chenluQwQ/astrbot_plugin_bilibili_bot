@@ -892,7 +892,7 @@ UP主：{video_info.get('owner_name','未知')}
         try:
             pid = provider_id if provider_id is not None else self.config.get("LLM_PROVIDER_ID","")
             full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
-            kwargs = {"prompt": full_prompt}
+            kwargs = {"prompt": full_prompt, "max_tokens": max_tokens}
             if pid:
                 kwargs["chat_provider_id"] = pid
             resp = await self.context.llm_generate(**kwargs)
@@ -1261,6 +1261,36 @@ UP主：{video_info.get('owner_name','未知')}
             "dynamic_times": self._format_time_pairs(self._dynamic_times),
             "dynamic_triggered": sorted(self._dynamic_triggered),
         }
+    def _mark_overdue_schedule_as_triggered_on_startup(self):
+        """插件重载/启动时，不补跑今天已经错过的定时任务。"""
+        now_dt = datetime.now()
+        today_str = now_dt.strftime("%Y-%m-%d")
+        changed = False
+        self._ensure_today_schedules()
+        proactive_overdue = {
+            f"{h}:{m:02d}"
+            for h, m in self._proactive_times
+            if (now_dt.hour > h or (now_dt.hour == h and now_dt.minute > m))
+        }
+        overdue_to_add = proactive_overdue - self._proactive_triggered
+        if overdue_to_add:
+            self._proactive_triggered.update(overdue_to_add)
+            self._save_schedule_state(self._proactive_times, self._proactive_triggered)
+            changed = True
+            logger.info(f"[BiliBot] 启动时跳过已过期的主动视频计划：{sorted(overdue_to_add)}")
+        dynamic_overdue = {
+            f"{h}:{m:02d}"
+            for h, m in self._dynamic_times
+            if (now_dt.hour > h or (now_dt.hour == h and now_dt.minute > m))
+        }
+        overdue_dynamic_to_add = dynamic_overdue - self._dynamic_triggered
+        if overdue_dynamic_to_add:
+            self._dynamic_triggered.update(overdue_dynamic_to_add)
+            self._save_dynamic_schedule_state(self._dynamic_times, self._dynamic_triggered)
+            changed = True
+            logger.info(f"[BiliBot] 启动时跳过已过期的动态计划：{sorted(overdue_dynamic_to_add)}")
+        if not changed:
+            logger.debug(f"[BiliBot] 启动时无需跳过过期计划（{today_str}）")
     async def _should_trigger_proactive_from_text(self, text):
         text = (text or "").strip()
         if not text or text.startswith("/"):
@@ -1459,6 +1489,7 @@ UP主：{video_info.get('up_name', '未知')}
             resp = await self.context.llm_generate(
                 chat_provider_id=provider_id,
                 prompt=content_parts,
+                max_tokens=max_tokens,
             )
             if resp and resp.completion_text:
                 return resp.completion_text.strip()
@@ -2305,6 +2336,7 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
         else: logger.warning("[BiliBot] Cookie无效")
     async def _start_bot(self):
         if self._running: return
+        self._mark_overdue_schedule_as_triggered_on_startup()
         self._running=True; self._task=asyncio.create_task(self._main_loop()); logger.info("[BiliBot] 启动")
     async def _stop_bot(self):
         self._running=False
