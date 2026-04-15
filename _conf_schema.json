@@ -119,9 +119,15 @@
     "hint": "如 Flux 系列模型"
   },
   "ENABLE_WEB_SEARCH": {
-    "description": "启用联网搜索（视频分析时补充背景知识）",
+    "description": "启用联网搜索（用户评论回复时自动判断是否需要搜索）",
     "type": "bool",
     "default": false
+  },
+  "WEB_SEARCH_JUDGE_PROVIDER_ID": {
+    "description": "搜索判断模型（读用户评论判断要不要搜，建议选轻量模型）",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider"
   },
   "WEB_SEARCH_BACKEND": {
     "description": "搜索后端",
@@ -216,6 +222,12 @@
     "type": "list",
     "default": [],
     "hint": "这些UP主的新视频会优先观看"
+  },
+  "PROACTIVE_VIDEO_POOLS": {
+    "description": "主动视频来源池",
+    "type": "list",
+    "default": ["popular"],
+    "hint": "可选: popular(综合热门) / weekly(每周必看) / precious(入站必刷) / ranking(全站排行) / ranking:分区rid / newlist:子分区tid。用 /bili分区 查看编号。示例: [\"popular\", \"ranking:160\", \"newlist:17\"]"
   },
   "PROACTIVE_LIKE": {
     "description": "主动点赞（≥6分）",
