@@ -804,6 +804,35 @@ class BiliBiliBot(Star):
                 return {"bvid":v.get("bvid",""),"title":v.get("title",""),"desc":v.get("desc",""),"owner_name":v.get("owner",{}).get("name",""),"owner_mid":v.get("owner",{}).get("mid",""),"tname":v.get("tname",""),"duration":v.get("duration",0),"pic":v.get("pic","")}
         except Exception as e: logger.error(f"[BiliBot] 获取视频信息失败：{e}")
         return None
+    async def _get_video_tags(self, bvid):
+        """获取视频标签"""
+        try:
+            d, _ = await self._http_get("https://api.bilibili.com/x/tag/archive/tags", params={"bvid": bvid})
+            if d["code"] == 0:
+                return [t.get("tag_name", "") for t in d.get("data", []) if t.get("tag_name")]
+        except: pass
+        return []
+    async def _get_hot_comments(self, oid, limit=10):
+        """获取视频热门评论"""
+        try:
+            d, _ = await self._http_get("https://api.bilibili.com/x/v2/reply/main", params={"oid": oid, "type": 1, "mode": 3, "ps": limit})
+            if d["code"] == 0:
+                replies = d.get("data", {}).get("replies", []) or []
+                return [r.get("content", {}).get("message", "")[:100] for r in replies if r.get("content", {}).get("message")]
+        except: pass
+        return []
+    async def _enrich_video_context(self, video_info):
+        """给视频信息补充标签和热评"""
+        bvid = video_info.get("bvid", "")
+        oid = video_info.get("oid") or (await self._get_video_oid(bvid) if bvid else None)
+        tags = await self._get_video_tags(bvid) if bvid else []
+        comments = await self._get_hot_comments(oid) if oid else []
+        extra = ""
+        if tags:
+            extra += f"\n标签：{'、'.join(tags[:10])}"
+        if comments:
+            extra += f"\n热门评论：\n" + "\n".join([f"- {c}" for c in comments[:5]])
+        return extra
     async def _analyze_video_with_vision(self, video_info):
         """用视觉模型分析视频封面+信息，生成内容概括"""
         media_result = await self._analyze_video_media(video_info)
@@ -813,13 +842,14 @@ class BiliBiliBot(Star):
         model = self.config.get("VIDEO_VISION_MODEL","")
         dur_min = video_info.get("duration",0) // 60
         dur_sec = video_info.get("duration",0) % 60
-        text_prompt = f"""请根据以下B站视频信息，写一段简洁的内容概括（150字以内），包括：这个视频大概在讲什么、是什么类型/风格、可能的受众。
+        extra_context = await self._enrich_video_context(video_info)
+        text_prompt = f"""请根据以下B站视频信息，写一段简洁的内容概括（300字以内），包括：这个视频大概在讲什么、是什么类型/风格、可能的受众。
 
 视频标题：{video_info.get('title','未知')}
 UP主：{video_info.get('owner_name','未知')}
 分区：{video_info.get('tname','未知')}
 时长：{dur_min}分{dur_sec}秒
-简介：{video_info.get('desc','无')[:500]}
+简介：{video_info.get('desc','无')[:500]}{extra_context}
 
 直接输出概括内容，不要加前缀。"""
         provider_id = self.config.get("VIDEO_VISION_PROVIDER_ID", "")
@@ -1480,13 +1510,14 @@ UP主：{video_info.get('owner_name','未知')}
         return None
 
     async def _analyze_video_text(self, video_info):
-        """用LLM纯文本分析视频（基于标题、简介、分区）"""
-        prompt = f"""请根据以下B站视频信息，写一段简洁的内容概括（150字以内），包括：这个视频大概在讲什么、是什么类型/风格、可能的受众。
+        """用LLM纯文本分析视频（基于标题、简介、分区、标签、热评）"""
+        extra_context = await self._enrich_video_context(video_info)
+        prompt = f"""请根据以下B站视频信息，写一段简洁的内容概括（300字以内），包括：这个视频大概在讲什么、是什么类型/风格、可能的受众。
 
 视频标题：{video_info.get('title', '未知')}
 UP主：{video_info.get('up_name', '未知')}
 分区：{video_info.get('tname', '未知')}
-简介：{video_info.get('desc', '无')[:500]}
+简介：{video_info.get('desc', '无')[:500]}{extra_context}
 
 直接输出概括内容，不要加前缀。"""
         result = await self._llm_call(prompt, max_tokens=250)
