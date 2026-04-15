@@ -1180,6 +1180,13 @@ UP主：{video_info.get('owner_name','未知')}
                 )
                 logger.info(f"[BiliBot] 📹 补录视频记忆：《{c['title']}》")
             ctx = f"【当前视频】\n标题：{c['title']}\nUP主：{c['owner_name']}（UID:{c.get('owner_mid','')})）\n分区：{c.get('tname','')}\n简介：{c.get('desc','')[:150]}\n内容概括：{c.get('analysis','')}"
+            # 补充标签和热评
+            tags = await self._get_video_tags(bvid)
+            comments = await self._get_hot_comments(oid)
+            if tags:
+                ctx += f"\n标签：{'、'.join(tags[:10])}"
+            if comments:
+                ctx += f"\n热门评论：" + " / ".join(comments[:3])
             return ctx, c
         # 没缓存，获取视频信息并分析
         vi = await self._get_video_info(oid)
@@ -1202,6 +1209,13 @@ UP主：{video_info.get('owner_name','未知')}
             extra={"bvid": bvid, "owner_mid": str(vi["owner_mid"]), "video_title": vi["title"]},
         )
         ctx = f"【当前视频】\n标题：{vi['title']}\nUP主：{vi['owner_name']}（UID:{vi['owner_mid']}）\n分区：{vi['tname']}\n简介：{vi.get('desc','')[:150]}\n内容概括：{analysis}"
+        # 补充标签和热评
+        tags = await self._get_video_tags(bvid)
+        comments = await self._get_hot_comments(oid)
+        if tags:
+            ctx += f"\n标签：{'、'.join(tags[:10])}"
+        if comments:
+            ctx += f"\n热门评论：" + " / ".join(comments[:3])
         return ctx, cache_entry
 
     # ===== Cookie管理 =====
