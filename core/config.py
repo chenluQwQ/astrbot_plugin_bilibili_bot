@@ -27,6 +27,7 @@ TEMP_IMAGE_DIR = os.path.join(DATA_DIR, "temp_images")
 TEMP_VIDEO_DIR = os.path.join(DATA_DIR, "temp_videos")
 REPLIED_AT_FILE = os.path.join(DATA_DIR, "replied_at.json")
 PROACTIVE_TRIGGER_LOG_FILE = os.path.join(DATA_DIR, "proactive_trigger_log.json")
+WEB_SEARCH_CACHE_FILE = os.path.join(DATA_DIR, "web_search_cache.json")
 
 BILI_MENTION_KEYWORDS = ["b站", "B站", "阿b", "阿B", "啊b", "啊B", "bil", "bili", "bilibili", "小破站", "哔哩哔哩"]
 
