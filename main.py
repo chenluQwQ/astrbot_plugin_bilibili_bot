@@ -1150,6 +1150,22 @@ UP主：{video_info.get('owner_name','未知')}
         # 有缓存直接用
         if bvid in vc:
             c = vc[bvid]
+            # 补录记忆：如果 video_memory.json 有缓存但 memory.json 没有对应记录
+            has_mem = any(m.get("bvid") == bvid or m.get("thread_id") == f"video:{bvid}" for m in self._memory)
+            if not has_mem:
+                mem_time = c.get("time", datetime.now().strftime("%Y-%m-%d %H:%M"))
+                memory_text = (
+                    f"[{mem_time}] 视频分析记忆：标题《{c['title']}》 "
+                    f"UP主:{c['owner_name']} 分区:{c.get('tname','')} "
+                    f"简介:{c.get('desc','')[:120]} 内容概括:{c.get('analysis','')[:200]}"
+                )
+                self._save_self_memory_record(
+                    f"video:{bvid}",
+                    memory_text,
+                    memory_type="video",
+                    extra={"bvid": bvid, "owner_mid": str(c.get("owner_mid", "")), "video_title": c["title"]},
+                )
+                logger.info(f"[BiliBot] 📹 补录视频记忆：《{c['title']}》")
             ctx = f"【当前视频】\n标题：{c['title']}\nUP主：{c['owner_name']}（UID:{c.get('owner_mid','')})）\n分区：{c.get('tname','')}\n简介：{c.get('desc','')[:150]}\n内容概括：{c.get('analysis','')}"
             return ctx, c
         # 没缓存，获取视频信息并分析
