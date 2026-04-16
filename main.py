@@ -2327,7 +2327,9 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
 - 直接输出推荐语"""
                             rec_text = await self._llm_call(rec_prompt, system_prompt=self._get_system_prompt(), max_tokens=60)
                             rec_text = re.sub(r'@\S+\s*', '', rec_text or "你可能会喜欢这个")
-                            rec_text = re.sub(r'^(主人|柠弥|亲爱的)[，,\s]*', '', rec_text)
+                            owner_name = (self.config.get("OWNER_NAME", "") or "").strip()
+                            _name_patterns = ["主人", "亲爱的"] + ([re.escape(owner_name)] if owner_name else [])
+                            rec_text = re.sub(rf'^({"|".join(_name_patterns)})[，,\s]*', '', rec_text)
                             rec_msg = f"@{owner_bili} {rec_text}"
                             if await self._send_comment(oid, rec_msg):
                                 actions.append("📢推荐给主人"); logger.info(f"[BiliBot] 📢 已@主人：{rec_msg}")
