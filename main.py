@@ -84,7 +84,7 @@ class BiliBiliBot(Star):
         self._proactive_task = None
         self._last_cookie_check = 0
         self._login_qrcode_key = None
-        self._first_poll = not os.path.exists(REPLIED_FILE)
+        self._first_poll = True  # 每次启动都先标记已有通知为已读，只回复启动后的新消息
         self._replied_at = set(self._load_json(REPLIED_AT_FILE, []))
         self._affection = self._load_json(AFFECTION_FILE, {})
         # 主人好感固定100
@@ -138,7 +138,7 @@ class BiliBiliBot(Star):
         try:
             if os.path.exists(path):
                 with open(path,"r",encoding="utf-8") as f: return json.load(f)
-        except: pass
+        except Exception: pass
         return default
     def _save_json(self, path, data):
         with open(path,"w",encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=2)
@@ -305,23 +305,25 @@ class BiliBiliBot(Star):
         if self._embed_client is None:
             api_key = self.config.get("EMBED_API_KEY","")
             if not api_key: return None
-            from openai import OpenAI
+            from openai import AsyncOpenAI
             base_url = self.config.get("EMBED_API_BASE","https://api.siliconflow.cn/v1")
-            self._embed_client = OpenAI(api_key=api_key, base_url=base_url)
+            self._embed_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         return self._embed_client
-    def _get_embedding(self, text):
+    async def _get_embedding(self, text):
         client = self._get_embed_client()
         if not client: return None
         try:
             embed_model = self.config.get("EMBED_MODEL","BAAI/bge-m3")
-            resp = client.embeddings.create(model=embed_model, input=text)
+            resp = await client.embeddings.create(model=embed_model, input=text)
             return resp.data[0].embedding
         except Exception as e:
-            logger.error(f"[BiliBot] Embedding 失败: {e}"); return None
+            logger.error(f"[BiliBot] Embedding 失败: {e}")
+            return None
     @staticmethod
     def _cosine_similarity(a, b):
         dot = sum(x*y for x,y in zip(a,b))
-        na = math.sqrt(sum(x*x for x in a)); nb = math.sqrt(sum(x*x for x in b))
+        na = math.sqrt(sum(x*x for x in a))
+        nb = math.sqrt(sum(x*x for x in b))
         return dot/(na*nb) if na and nb else 0
 
     # ===== 视觉模型 =====
@@ -329,25 +331,26 @@ class BiliBiliBot(Star):
         if self._video_vision_client is None:
             api_key = self.config.get("VIDEO_VISION_API_KEY","")
             if not api_key: return None
-            from openai import OpenAI
+            from openai import AsyncOpenAI
             base_url = self.config.get("VIDEO_VISION_API_BASE","https://api.siliconflow.cn/v1")
-            self._video_vision_client = OpenAI(api_key=api_key, base_url=base_url)
+            self._video_vision_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         return self._video_vision_client
     def _get_image_vision_client(self):
         if self._image_vision_client is None:
             api_key = self.config.get("IMAGE_VISION_API_KEY","")
             if not api_key: return None
-            from openai import OpenAI
+            from openai import AsyncOpenAI
             base_url = self.config.get("IMAGE_VISION_API_BASE","https://api.siliconflow.cn/v1")
-            self._image_vision_client = OpenAI(api_key=api_key, base_url=base_url)
+            self._image_vision_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         return self._image_vision_client
-    def _vision_call(self, client, model, content_parts, max_tokens=250):
+    async def _vision_call(self, client, model, content_parts, max_tokens=250):
         """通用视觉模型调用"""
         try:
-            resp = client.chat.completions.create(model=model, messages=[{"role":"user","content":content_parts}], max_tokens=max_tokens)
+            resp = await client.chat.completions.create(model=model, messages=[{"role":"user","content":content_parts}], max_tokens=max_tokens)
             return resp.choices[0].message.content.strip() if resp.choices else None
         except Exception as e:
-            logger.error(f"[BiliBot] 视觉模型调用失败: {e}"); return None
+            logger.error(f"[BiliBot] 视觉模型调用失败: {e}")
+            return None
     async def _fetch_image_base64(self, url):
         """下载图片并转base64"""
         try:
@@ -367,7 +370,7 @@ class BiliBiliBot(Star):
             content = d.get("data",{}).get("root",{}).get("content",{})
             pictures = content.get("pictures",[])
             return [p["img_src"] for p in pictures if "img_src" in p]
-        except: return []
+        except Exception: return []
     async def _recognize_images(self, image_urls):
         """用视觉模型识别评论中的图片"""
         if not image_urls: return ""
@@ -385,10 +388,11 @@ class BiliBiliBot(Star):
             content.append({"type":"text","text":"请用50字以内描述这些图片的内容。"})
             result = await self._astrbot_multimodal_generate(provider_id, content, max_tokens=100)
             if not result and client and model:
-                result = self._vision_call(client, model, content, max_tokens=100)
+                result = await self._vision_call(client, model, content, max_tokens=100)
             return result or ""
         except Exception as e:
-            logger.error(f"[BiliBot] 图片识别失败: {e}"); return ""
+            logger.error(f"[BiliBot] 图片识别失败: {e}")
+            return ""
 
     # ===== 好感度 =====
     def _is_owner(self, mid):
@@ -417,8 +421,11 @@ class BiliBiliBot(Star):
         um = triggered.get(str(mid), [])
         for t,msg in mm.items():
             if old_score < t <= new_score and t not in um:
-                um.append(t); triggered[str(mid)]=um; self._save_json(MILESTONE_FILE, triggered)
-                logger.info(f"[BiliBot] 🏆 里程碑！{username} 达到 {t} 分"); return msg
+                um.append(t)
+                triggered[str(mid)]=um
+                self._save_json(MILESTONE_FILE, triggered)
+                logger.info(f"[BiliBot] 🏆 里程碑！{username} 达到 {t} 分")
+                return msg
         return None
     @staticmethod
     def _is_blocked(text): return any(kw in text for kw in BLOCK_KEYWORDS)
@@ -426,7 +433,7 @@ class BiliBiliBot(Star):
         try:
             d, _ = await self._http_post("https://api.bilibili.com/x/relation/modify", data={"fid":mid,"act":5,"re_src":11,"csrf":self.config.get("BILI_JCT","")})
             return d["code"]==0
-        except: return False
+        except Exception: return False
     def _log_security_event(self, event_type, mid, username, content, detail):
         logs = self._load_json(SECURITY_LOG_FILE, [])
         logs.append({"time":datetime.now().strftime("%Y-%m-%d %H:%M"),"type":event_type,"uid":str(mid),"username":username,"content":content[:200],"detail":detail})
@@ -492,7 +499,7 @@ class BiliBiliBot(Star):
             from lunardate import LunarDate
             l = LunarDate.fromSolarDate(datetime.now().year,datetime.now().month,datetime.now().day)
             lunar_md = f"{l.month:02d}-{l.day:02d}"
-        except: lunar_md = ""
+        except Exception: lunar_md = ""
         fests = {"01-01":"今天是元旦！语气温暖。","02-14":"今天是情人节。","04-01":"今天是愚人节！可以开小玩笑。","05-01":"今天是劳动节。","10-31":"今天是万圣节，语气神秘。","12-25":"今天是圣诞节，语气温柔。","12-31":"今天是跨年夜。"}
         lfests = {"01-01":"今天是春节！热情说新年快乐。","01-15":"今天是元宵节。","05-05":"今天是端午节。","08-15":"今天是中秋节。"}
         return fests.get(today,"") or lfests.get(lunar_md,"")
@@ -516,11 +523,11 @@ class BiliBiliBot(Star):
     def _parse_evolve_json(raw_text, old_habits, old_opinions):
         text = raw_text.replace("```json","").replace("```","").strip()
         try: return json.loads(text)
-        except: pass
+        except Exception: pass
         m = re.search(r'\{.*\}', text, re.DOTALL)
         if m:
             try: return json.loads(m.group())
-            except: pass
+            except Exception: pass
         json_start = text.find('{')
         if json_start != -1:
             fragment = text[json_start:]
@@ -530,7 +537,7 @@ class BiliBiliBot(Star):
             fragment = re.sub(r',\s*$', '', fragment)
             fragment += ']' * max(0, oq) + '}' * max(0, ob)
             try: return json.loads(fragment)
-            except: pass
+            except Exception: pass
         logger.warning(f"[BiliBot] 性格演化JSON解析失败：{raw_text[:200]}")
         reflection = ""
         rm = re.search(r'"reflection"\s*:\s*"([^"]*)"', text)
@@ -547,7 +554,8 @@ class BiliBiliBot(Star):
         logger.info("[BiliBot] 🌱 开始每日性格演化反思...")
         recent = sorted(self._memory, key=lambda x: x.get("time",""), reverse=True)[:30]
         if len(recent) < 5:
-            logger.info("[BiliBot] 🌱 记忆太少，跳过演化"); return
+            logger.info("[BiliBot] 🌱 记忆太少，跳过演化")
+            return
         recent_texts = "\n".join([m["text"] for m in recent[:20]])
         old_traits = evo.get("evolved_traits", [])
         old_habits = evo.get("speech_habits", [])
@@ -619,14 +627,14 @@ class BiliBiliBot(Star):
         logger.error(f"[BiliBot] 🌱 性格演化连续{max_retries}次失败，今日跳过")
 
     # ===== 记忆系统 =====
-    def _save_memory_record(self, rpid, thread_id, user_id, username, content, reply_text, source="bilibili"):
+    async def _save_memory_record(self, rpid, thread_id, user_id, username, content, reply_text, source="bilibili"):
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         text = f"[{now}] 用户{user_id}({username})说：{content} | Bot回复：{reply_text}"
-        emb = self._get_embedding(text)
+        emb = await self._get_embedding(text)
         rec = {"rpid":str(rpid),"thread_id":str(thread_id),"user_id":str(user_id),"username":username,"time":now,"text":text,"source":source,"memory_type":"chat"}
         if emb: rec["embedding"]=emb
         self._save_memory_entry(rec)
-    def _save_self_memory_record(self, thread_id, text, source="bilibili", memory_type="chat", user_id="self", extra=None):
+    async def _save_self_memory_record(self, thread_id, text, source="bilibili", memory_type="chat", user_id="self", extra=None):
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         rec = {
             "rpid": f"{thread_id}_{int(datetime.now().timestamp())}",
@@ -639,7 +647,7 @@ class BiliBiliBot(Star):
         }
         if extra:
             rec.update(extra)
-        emb = self._get_embedding(text)
+        emb = await self._get_embedding(text)
         if emb:
             rec["embedding"] = emb
         self._save_memory_entry(rec)
@@ -647,7 +655,7 @@ class BiliBiliBot(Star):
         docs = [m for m in self._memory if m.get("thread_id")==str(thread_id) and self._match_memory_type(m, {"chat"})]
         docs.sort(key=lambda x:x.get("time",""))
         return [m["text"] for m in docs]
-    def _get_user_semantic_memories(self, user_id, query_text, memory_types=None):
+    async def _get_user_semantic_memories(self, user_id, query_text, memory_types=None):
         um = [
             m for m in self._memory
             if m.get("user_id")==str(user_id)
@@ -658,12 +666,12 @@ class BiliBiliBot(Star):
         qq_mem = self._load_json(QQ_MEMORY_FILE, [])
         um += [m for m in qq_mem if m.get("user_id")==str(user_id) and "embedding" in m]
         if not um: return []
-        qe = self._get_embedding(query_text)
+        qe = await self._get_embedding(query_text)
         if not qe: return []
         scored = [(self._cosine_similarity(qe, m["embedding"]), m["text"]) for m in um]
         scored.sort(reverse=True)
         return [t for s,t in scored[:MAX_SEMANTIC_RESULTS] if s>0.6]
-    def _search_memories(self, query_text, limit=5, source=None, memory_types=None, user_id=None):
+    async def _search_memories(self, query_text, limit=5, source=None, memory_types=None, user_id=None):
         cands = list(self._memory)
         # 合并QQ记忆
         if source != "bilibili":
@@ -675,7 +683,7 @@ class BiliBiliBot(Star):
         cands = [self._normalize_memory_entry(m) for m in cands if self._match_memory_type(m, memory_types)]
         cands = [m for m in cands if "embedding" in m]
         if not cands: return []
-        qe = self._get_embedding(query_text)
+        qe = await self._get_embedding(query_text)
         if not qe: return []
         scored = [(self._cosine_similarity(qe,m["embedding"]),m) for m in cands]
         scored.sort(reverse=True)
@@ -690,7 +698,8 @@ class BiliBiliBot(Star):
         um = [m for m in self._memory if m.get("user_id")==str(user_id) and self._match_memory_type(m, {"chat"})]
         if len(um) <= USER_MEMORY_COMPRESS_THRESHOLD: return
         logger.info(f"[BiliBot] 🗜️ {username} 记忆达 {len(um)} 条，压缩...")
-        um.sort(key=lambda x:x.get("time","")); old = um[:-USER_MEMORY_KEEP_RECENT]
+        um.sort(key=lambda x:x.get("time",""))
+        old = um[:-USER_MEMORY_KEEP_RECENT]
         old_texts = "\n".join([m["text"] for m in old])
         prompt = f'请根据以下与用户"{username}"的历史互动，完成：\n1. 总结（100字以内）\n2. 3-5个标签\n3. 提取用户个人信息\n\n历史：\n{old_texts[:3000]}\n\nJSON格式：{{"summary":"","tags":[],"user_facts":[]}}'
         try:
@@ -698,12 +707,12 @@ class BiliBiliBot(Star):
             if not text: return
             text = text.replace("```json","").replace("```","").strip()
             try: result = json.loads(text)
-            except:
+            except Exception: 
                 m = re.search(r'\{.*\}', text, re.DOTALL)
                 result = json.loads(m.group()) if m else {"summary":text[:100],"tags":[],"user_facts":[]}
             self._update_user_profile(user_id, impression=result.get("summary") or None, new_facts=result.get("user_facts") or None, new_tags=result.get("tags") or None)
             now = datetime.now().strftime("%Y-%m-%d %H:%M")
-            emb = self._get_embedding(result.get("summary",""))
+            emb = await self._get_embedding(result.get("summary",""))
             comp = {"rpid":f"compressed_{int(datetime.now().timestamp())}","thread_id":"compressed","user_id":str(user_id),"time":now,"text":f"[记忆压缩] {result.get('summary','')}","source":"bilibili","memory_type":"user_summary"}
             if emb: comp["embedding"]=emb
             old_rpids = {m["rpid"] for m in old}
@@ -726,7 +735,7 @@ class BiliBiliBot(Star):
             if not summary:
                 return
             now = datetime.now().strftime("%Y-%m-%d %H:%M")
-            emb = self._get_embedding(summary)
+            emb = await self._get_embedding(summary)
             comp = {
                 "rpid": f"thread_compressed_{int(datetime.now().timestamp())}",
                 "thread_id": str(thread_id),
@@ -778,12 +787,18 @@ class BiliBiliBot(Star):
                     if up_profile:
                         parts.append(up_profile.replace("【对该用户的了解】","【该视频UP主的了解】"))
                     # UP主相关语义记忆
-                    up_mems = self._get_user_semantic_memories(up_mid, query_text, memory_types={"chat", "user_summary"})
+                    up_mems = await self._get_user_semantic_memories(up_mid, query_text, memory_types={"chat", "user_summary"})
                     if up_mems:
                         parts.append("【与该UP主的历史互动】\n" + "\n".join(up_mems))
-            related_video_mems = self._search_memories(query_text, limit=2, source="bilibili", memory_types={"video"})
+            related_video_mems = await self._search_memories(query_text, limit=2, source="bilibili", memory_types={"video"})
             if related_video_mems:
                 parts.append("【相关视频记忆】\n" + "\n".join(related_video_mems))
+
+        # 3.5 动态评论区场景（comment_type 11=图文动态, 17=文字动态）
+        elif comment_type in (11, 17) and oid:
+            dc = await self._get_dynamic_context(oid)
+            if dc:
+                parts.append(dc)
 
         # 4. 评论线上下文（最近10条）
         td = self._get_thread_memories(thread_id)
@@ -791,12 +806,12 @@ class BiliBiliBot(Star):
             parts.append("【本评论线对话】\n" + "\n".join(td[-10:]))
 
         # 5. 用户语义记忆（优先该UID相关）
-        user_mems = self._get_user_semantic_memories(user_id, query_text, memory_types={"chat", "user_summary"})
+        user_mems = await self._get_user_semantic_memories(user_id, query_text, memory_types={"chat", "user_summary"})
         if user_mems:
             parts.append("【与该用户的相关记忆】\n" + "\n".join(user_mems))
         else:
             # 没有该用户的记忆，搜全局相关
-            general_mems = self._search_memories(query_text, limit=3, memory_types={"chat", "video", "dynamic", "user_summary"})
+            general_mems = await self._search_memories(query_text, limit=3, memory_types={"chat", "video", "dynamic", "user_summary"})
             if general_mems:
                 parts.append("【相关历史记忆】\n" + "\n".join(general_mems))
 
@@ -807,7 +822,7 @@ class BiliBiliBot(Star):
         try:
             d, _ = await self._http_get("https://api.bilibili.com/x/web-interface/view", params={"aid":oid})
             if d["code"]==0: return d["data"].get("bvid","")
-        except: pass
+        except Exception: pass
         return ""
     async def _get_video_info(self, oid):
         try:
@@ -823,7 +838,7 @@ class BiliBiliBot(Star):
             d, _ = await self._http_get("https://api.bilibili.com/x/tag/archive/tags", params={"bvid": bvid})
             if d["code"] == 0:
                 return [t.get("tag_name", "") for t in d.get("data", []) if t.get("tag_name")]
-        except: pass
+        except Exception: pass
         return []
     async def _get_hot_comments(self, oid, limit=10):
         """获取视频热门评论"""
@@ -832,7 +847,7 @@ class BiliBiliBot(Star):
             if d["code"] == 0:
                 replies = d.get("data", {}).get("replies", []) or []
                 return [r.get("content", {}).get("message", "")[:100] for r in replies if r.get("content", {}).get("message")]
-        except: pass
+        except Exception: pass
         return []
 
     # ===== 联网搜索 =====
@@ -844,8 +859,8 @@ class BiliBiliBot(Star):
             if not api_key:
                 return None
             if backend == "perplexity":
-                from openai import OpenAI
-                self._web_search_client = OpenAI(
+                from openai import AsyncOpenAI
+                self._web_search_client = AsyncOpenAI(
                     api_key=api_key,
                     base_url="https://api.perplexity.ai",
                 )
@@ -853,8 +868,8 @@ class BiliBiliBot(Star):
                 base_url = self.config.get("WEB_SEARCH_API_BASE", "")
                 if not base_url:
                     return None
-                from openai import OpenAI
-                self._web_search_client = OpenAI(api_key=api_key, base_url=base_url)
+                from openai import AsyncOpenAI
+                self._web_search_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         return self._web_search_client
 
     async def _web_search(self, query: str) -> str:
@@ -943,7 +958,7 @@ class BiliBiliBot(Star):
             return ""
         model = self.config.get("WEB_SEARCH_MODEL", "") or "sonar"
         try:
-            resp = client.chat.completions.create(
+            resp = await client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": "你是一个搜索助手。请根据用户的问题，简洁地汇总相关信息，300字以内，用中文回答。"},
@@ -1000,7 +1015,7 @@ class BiliBiliBot(Star):
             logger.warning("[BiliBot] custom 搜索后端需要配置 WEB_SEARCH_MODEL")
             return ""
         try:
-            resp = client.chat.completions.create(
+            resp = await client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": "你是一个搜索助手。请根据用户的问题，简洁地汇总相关信息，300字以内，用中文回答。"},
@@ -1148,12 +1163,43 @@ UP主：{video_info.get('owner_name','未知')}
                 b64 = await self._fetch_image_base64(video_info["pic"])
                 if b64:
                     content = [{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}},{"type":"text","text":text_prompt}]
-                    result = self._vision_call(client, model, content, max_tokens=250)
+                    result = await self._vision_call(client, model, content, max_tokens=250)
                     if result: return result
             except Exception as e: logger.warning(f"[BiliBot] 视觉分析封面失败: {e}")
         # 回退：纯文本LLM分析
         result = await self._llm_call(text_prompt, max_tokens=250)
         return result or f"视频《{video_info.get('title','未知')}》，UP主：{video_info.get('owner_name','未知')}，分区：{video_info.get('tname','未知')}。简介：{video_info.get('desc','无')[:100]}"
+    async def _get_dynamic_context(self, oid):
+        """获取动态上下文：从B站API拉取动态内容，失败则从记忆中搜索"""
+        # 1. 尝试从B站API获取动态原文
+        try:
+            d, _ = await self._http_get(
+                "https://api.bilibili.com/x/polymer/web-dynamic/v1/detail",
+                params={"id": oid}
+            )
+            if d.get("code") == 0:
+                item = d.get("data", {}).get("item", {})
+                modules = item.get("modules", {})
+                # 提取动态文本
+                desc = modules.get("module_dynamic", {}).get("desc", {})
+                text = desc.get("text", "")
+                # 提取发布时间
+                author = modules.get("module_author", {})
+                pub_time = author.get("pub_time", "")
+                if text:
+                    ctx = f"【当前动态（Bot自己发的）】\n内容：{text}"
+                    if pub_time:
+                        ctx += f"\n发布时间：{pub_time}"
+                    return ctx
+        except Exception as e:
+            logger.debug(f"[BiliBot] 动态API获取失败: {e}")
+        # 2. 回退：从记忆中找最近的动态记录
+        dynamic_mems = [m for m in self._memory if m.get("memory_type") == "dynamic"]
+        if dynamic_mems:
+            latest = dynamic_mems[-1]
+            return f"【最近发布的动态】\n{latest.get('text', '')}"
+        return ""
+
     async def _get_video_context(self, oid, comment_type):
         """获取视频上下文：基础信息 + 内容总结（有缓存用缓存，没有就分析）"""
         if comment_type != 1: return "", None
@@ -1172,7 +1218,7 @@ UP主：{video_info.get('owner_name','未知')}
                     f"UP主:{c['owner_name']} 分区:{c.get('tname','')} "
                     f"简介:{c.get('desc','')[:120]} 内容概括:{c.get('analysis','')[:200]}"
                 )
-                self._save_self_memory_record(
+                await self._save_self_memory_record(
                     f"video:{bvid}",
                     memory_text,
                     memory_type="video",
@@ -1196,13 +1242,14 @@ UP主：{video_info.get('owner_name','未知')}
         logger.info(f"[BiliBot] 📹 分析结果：{analysis[:60]}...")
         analyzed_at = datetime.now().strftime("%Y-%m-%d %H:%M")
         cache_entry = {"bvid":bvid,"title":vi["title"],"desc":vi.get("desc","")[:200],"owner_name":vi["owner_name"],"owner_mid":str(vi["owner_mid"]),"tname":vi["tname"],"analysis":analysis,"time":analyzed_at}
-        vc[bvid] = cache_entry; self._save_json(VIDEO_MEMORY_FILE, vc)
+        vc[bvid] = cache_entry
+        self._save_json(VIDEO_MEMORY_FILE, vc)
         memory_text = (
             f"[{analyzed_at}] 视频分析记忆：标题《{vi['title']}》 "
             f"UP主:{vi['owner_name']} 分区:{vi['tname']} "
             f"简介:{vi.get('desc','')[:120]} 内容概括:{analysis[:200]}"
         )
-        self._save_self_memory_record(
+        await self._save_self_memory_record(
             f"video:{bvid}",
             memory_text,
             memory_type="video",
@@ -1264,7 +1311,7 @@ UP主：{video_info.get('owner_name','未知')}
             try:
                 ch=dict(self._headers()); ch["Cookie"]=f"SESSDATA={updates['SESSDATA']}; bili_jct={updates.get('BILI_JCT',bjct)}"
                 await self._http_post(BILI_COOKIE_CONFIRM_URL, headers=ch, data={"csrf":updates.get("BILI_JCT",bjct),"refresh_token":rt})
-            except: pass
+            except Exception: pass
             for k,v in updates.items(): self.config[k]=v
             self.config.save_config()
             return True,f"✅ Cookie 刷新成功！"
@@ -1277,9 +1324,13 @@ UP主：{video_info.get('owner_name','未知')}
     def _get_mixin_key(self, orig): return reduce(lambda s,i:s+orig[i], MIXIN_KEY_ENC_TAB, "")[:32]
     async def sign_wbi_params(self, params):
         try:
-            ik,sk=await self._get_wbi_keys(); mk=self._get_mixin_key(ik+sk); params["wts"]=int(time.time()); params=dict(sorted(params.items()))
-            params["w_rid"]=hashlib.md5(("&".join(f"{k}={v}" for k,v in params.items())+mk).encode()).hexdigest(); return params
-        except: return params
+            ik,sk=await self._get_wbi_keys()
+            mk=self._get_mixin_key(ik+sk)
+            params["wts"]=int(time.time())
+            params=dict(sorted(params.items()))
+            params["w_rid"]=hashlib.md5(("&".join(f"{k}={v}" for k,v in params.items())+mk).encode()).hexdigest()
+            return params
+        except Exception: return params
 
     # ===== 扫码登录 =====
     async def _qr_login_generate(self):
@@ -1293,11 +1344,13 @@ UP主：{video_info.get('owner_name','未知')}
             async with aiohttp.ClientSession() as s:
                 async with s.get(BILI_QR_POLL_URL, params={"qrcode_key":qrcode_key}, headers={"User-Agent":USER_AGENT}, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     d_full = await resp.json(content_type=None)
-                    d=d_full["data"]; code=d["code"]
+                    d=d_full["data"]
+                    code=d["code"]
                     mm={0:"登录成功",86038:"二维码已失效",86090:"已扫码，请在手机上确认",86101:"等待扫码中..."}
                     cookies={}
                     if code==0:
-                        url=d.get("url",""); rt=d.get("refresh_token","")
+                        url=d.get("url","")
+                        rt=d.get("refresh_token","")
                         if url:
                             from urllib.parse import urlparse,parse_qs; p=parse_qs(urlparse(url).query)
                             cookies={"SESSDATA":p.get("SESSDATA",[""])[0],"bili_jct":p.get("bili_jct",[""])[0],"DedeUserID":p.get("DedeUserID",[""])[0],"REFRESH_TOKEN":rt}
@@ -1316,24 +1369,29 @@ UP主：{video_info.get('owner_name','未知')}
                 kwargs["chat_provider_id"] = pid
             resp = await self.context.llm_generate(**kwargs)
             return resp.completion_text.strip() if resp and resp.completion_text else None
-        except Exception as e: logger.error(f"[BiliBot] LLM 调用失败: {e}"); return None
+        except Exception as e:
+            logger.error(f"[BiliBot] LLM 调用失败: {e}")
+            return None
     def _get_system_prompt(self):
         if self.config.get("USE_ASTRBOT_PERSONA",True):
             try:
                 persona = self.context.persona_manager.get_default_persona_v3()
                 if persona: return persona["prompt"]
-            except: pass
+            except Exception: pass
         return self.config.get("CUSTOM_SYSTEM_PROMPT","你是一个B站UP主的AI助手。")
     async def _generate_reply(self, content, mid, username, thread_id, oid, comment_type, image_desc=""):
         try:
-            sp = self._get_system_prompt(); on = self.config.get("OWNER_NAME","") or "主人"
+            sp = self._get_system_prompt()
+            on = self.config.get("OWNER_NAME","") or "主人"
             is_owner = self._is_owner(mid)
-            cs = self._affection.get(str(mid),0); lv = self._get_level(cs, mid)
+            cs = self._affection.get(str(mid),0)
+            lv = self._get_level(cs, mid)
             lp = self._get_level_prompts()[lv]
             clean_content, is_suspicious, reason = self._sanitize_user_input(content, username, mid)
             mc = await self._build_memory_context(thread_id, mid, clean_content, oid=oid, comment_type=comment_type)
             ms = f"\n\n【记忆参考】\n{mc}" if mc else ""
-            mood,mp = self._get_today_mood(); fest = self._get_festival_prompt()
+            mood,mp = self._get_today_mood()
+            fest = self._get_festival_prompt()
             fs = f"\n特殊日期：{fest}" if fest else ""
             pp = self._get_personality_prompt()
             pps = f"\n{pp}" if pp else ""
@@ -1355,12 +1413,12 @@ UP主：{video_info.get('owner_name','未知')}
             rt = rt.replace("```json","").replace("```","").strip()
             r = None
             try: r = json.loads(rt)
-            except: pass
+            except Exception: pass
             if r is None:
                 m = re.search(r'\{.*\}', rt, re.DOTALL)
                 if m:
                     try: r = json.loads(m.group())
-                    except: pass
+                    except Exception: pass
             if r is None or not isinstance(r, dict):
                 rm = re.search(r'"reply"\s*:\s*"([^"]*)"', rt)
                 reply_text = rm.group(1) if rm else rt[:50]
@@ -1369,7 +1427,9 @@ UP主：{video_info.get('owner_name','未知')}
             if is_suspicious:
                 r["score_delta"] = min(r.get("score_delta", 0), -3)
             return {"score_delta":r.get("score_delta",1),"reply":r.get("reply",""),"impression":r.get("impression",""),"user_facts":r.get("user_facts",[]),"permanent_memory":r.get("permanent_memory","")}
-        except Exception as e: logger.error(f"[BiliBot] 回复生成失败: {e}\n{traceback.format_exc()}"); return None
+        except Exception as e:
+            logger.error(f"[BiliBot] 回复生成失败: {e}\n{traceback.format_exc()}")
+            return None
 
     # ===== B站API =====
     async def _send_reply(self, oid, rpid, reply_type, content):
@@ -1378,9 +1438,12 @@ UP主：{video_info.get('owner_name','未知')}
             if d["code"]==0: return True
             elif d["code"]==-101: logger.error("[BiliBot] SESSDATA 失效！")
             elif d["code"]==-111: logger.error("[BiliBot] bili_jct 错误！")
-            else: logger.warning(f"[BiliBot] 回复失败: {d.get('message',d['code'])}")
+            else:
+                logger.warning(f"[BiliBot] 回复失败: {d.get('message',d['code'])}")
+                return False
+        except Exception as e:
+            logger.error(f"[BiliBot] 回复出错: {e}")
             return False
-        except Exception as e: logger.error(f"[BiliBot] 回复出错: {e}"); return False
     def _strip_at_prefix(self, content):
         content = (content or "").strip()
         content = re.sub(r'^@[^ \t\n\r]+\s*', '', content)
@@ -1414,10 +1477,11 @@ UP主：{video_info.get('owner_name','未知')}
             if schedule.get("date") == datetime.now().strftime("%Y-%m-%d"):
                 times = []
                 for t in schedule.get("proactive_times", []):
-                    h, m = t.split(":"); times.append((int(h), int(m)))
+                    h, m = t.split(":")
+                    times.append((int(h), int(m)))
                 triggered = set(schedule.get("proactive_triggered", []))
                 return times, triggered
-        except: pass
+        except Exception: pass
         return self._generate_daily_schedule()
 
     def _save_schedule_state(self, times, triggered):
@@ -1531,7 +1595,7 @@ UP主：{video_info.get('owner_name','未知')}
                 match = re.search(r'\{.*\}', text, re.DOTALL)
                 if match:
                     try: return json.loads(match.group())
-                    except: pass
+                    except Exception: pass
             logger.warning(f"[BiliBot] 动态内容JSON解析失败: {text[:100]}")
             return None
         except Exception as e:
@@ -1636,7 +1700,7 @@ UP主：{video_info.get('owner_name','未知')}
                 else:
                     success = await self._post_dynamic_text(text)
                 try: os.remove(local_path)
-                except: pass
+                except Exception: pass
             else:
                 success = await self._post_dynamic_text(text)
         else:
@@ -1646,7 +1710,7 @@ UP主：{video_info.get('owner_name','未知')}
             self._save_json(DYNAMIC_LOG_FILE, log[-100:])
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
             short_text = text[:60] if len(text) > 60 else text
-            self._save_memory_entry({"rpid": f"dynamic_{int(time.time())}", "thread_id": "dynamic", "user_id": "self", "time": now_str, "text": f"[{now_str}] Bot发了一条动态：{short_text}", "source": "bilibili", "memory_type": "dynamic"})
+            await self._save_self_memory_record("dynamic", f"[{now_str}] Bot发了一条动态：{short_text}", source="bilibili", memory_type="dynamic")
             logger.info("[BiliBot] 🎉 动态发布完成！")
         else:
             logger.error("[BiliBot] ❌ 动态发布失败")
@@ -1667,10 +1731,11 @@ UP主：{video_info.get('owner_name','未知')}
             if schedule.get("date") == datetime.now().strftime("%Y-%m-%d"):
                 times = []
                 for t in schedule.get("dynamic_times", []):
-                    h, m = t.split(":"); times.append((int(h), int(m)))
+                    h, m = t.split(":")
+                    times.append((int(h), int(m)))
                 triggered = set(schedule.get("dynamic_triggered", []))
                 return times, triggered
-        except: pass
+        except Exception: pass
         return self._generate_dynamic_schedule()
 
     def _save_dynamic_schedule_state(self, times, triggered):
@@ -1780,11 +1845,13 @@ UP主：{video_info.get('owner_name','未知')}
             v = vlist[0]
             return {"bvid": v["bvid"], "title": v["title"], "desc": v.get("description",""), "up_name": v["author"], "up_mid": mid, "pubdate": v["created"], "pic": v.get("pic","")}
         except Exception as e:
-            logger.error(f"[BiliBot] 获取UP主最新视频失败: {e}"); return None
+            logger.error(f"[BiliBot] 获取UP主最新视频失败: {e}")
+            return None
 
     async def _get_hot_videos(self, min_pubdate=0):
         """从B站综合热门拉视频"""
-        MIN_VIEWS = 10000; videos = []
+        MIN_VIEWS = 10000
+        videos = []
         try:
             d, _ = await self._http_get("https://api.bilibili.com/x/web-interface/popular", params={"ps": 50, "pn": random.randint(1, 5)})
             if d["code"] == 0:
@@ -1802,7 +1869,8 @@ UP主：{video_info.get('owner_name','未知')}
 
     async def _get_newlist_videos(self, tid, min_pubdate=0):
         """从分区最新拉视频"""
-        MIN_VIEWS = 10000; videos = []
+        MIN_VIEWS = 10000
+        videos = []
         try:
             d, _ = await self._http_get("https://api.bilibili.com/x/web-interface/newlist", params={"rid": tid, "ps": 50, "pn": 1, "type": 0})
             if d["code"] == 0:
@@ -1815,11 +1883,13 @@ UP主：{video_info.get('owner_name','未知')}
                 logger.warning(f"[BiliBot] newlist返回非0: code={d['code']} tid={tid}")
         except Exception as e:
             logger.warning(f"[BiliBot] newlist失败: {e}")
-        return videos
-        seen = set(); unique = []
+        seen = set()
+        unique = []
         for v in videos:
-            if v["bvid"] and v["bvid"] not in seen: seen.add(v["bvid"]); unique.append(v)
-        unique.sort(key=lambda x: x.get("view",0), reverse=True)
+            if v["bvid"] and v["bvid"] not in seen:
+                seen.add(v["bvid"])
+                unique.append(v)
+        unique.sort(key=lambda x: x.get("view", 0), reverse=True)
         return unique
 
     async def _get_weekly_videos(self):
@@ -1925,7 +1995,7 @@ UP主：{video_info.get('owner_name','未知')}
         try:
             d, _ = await self._http_get("https://api.bilibili.com/x/web-interface/view", params={"bvid": bvid})
             if d.get("code") == 0: return d["data"]["aid"]
-        except: pass
+        except Exception: pass
         return None
 
     async def _analyze_video_text(self, video_info):
@@ -2074,7 +2144,7 @@ UP主：{video_info.get('up_name', '未知')}
             ]
             result = await self._astrbot_multimodal_generate(provider_id, content, max_tokens=200)
             if not result and client and model:
-                result = self._vision_call(client, model, content, max_tokens=200)
+                result = await self._vision_call(client, model, content, max_tokens=200)
             if result:
                 return result
             logger.warning(f"[BiliBot] 视频直读失败，回退截帧：{bvid}")
@@ -2096,7 +2166,7 @@ UP主：{video_info.get('up_name', '未知')}
             })
             result = await self._astrbot_multimodal_generate(provider_id, frame_content, max_tokens=200)
             if not result and client and model:
-                result = self._vision_call(client, model, frame_content, max_tokens=200)
+                result = await self._vision_call(client, model, frame_content, max_tokens=200)
             return result
         except Exception as e:
             logger.warning(f"[BiliBot] 视频媒体分析失败({bvid})：{e}")
@@ -2126,7 +2196,8 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
             if m: return json.loads(m.group())
             return json.loads(text)
         except Exception as e:
-            logger.error(f"[BiliBot] 视频评价失败: {e}"); return None
+            logger.error(f"[BiliBot] 视频评价失败: {e}")
+            return None
 
     async def _generate_proactive_comment(self, video_info, video_description):
         sp = self._get_system_prompt()
@@ -2151,19 +2222,20 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
             d, _ = await self._http_post(BILI_REPLY_URL, data={"oid": oid, "type": oid_type, "message": comment_text, "csrf": self.config.get("BILI_JCT","")})
             return d.get("code") == 0
         except Exception as e:
-            logger.error(f"[BiliBot] 发送评论异常: {e}"); return False
+            logger.error(f"[BiliBot] 发送评论异常: {e}")
+            return False
 
     async def _like_video(self, aid):
         try:
             d, _ = await self._http_post("https://api.bilibili.com/x/web-interface/archive/like", data={"aid": aid, "like": 1, "csrf": self.config.get("BILI_JCT","")})
             return d.get("code") == 0
-        except: return False
+        except Exception: return False
 
     async def _coin_video(self, aid, num=1):
         try:
             d, _ = await self._http_post("https://api.bilibili.com/x/web-interface/coin/add", data={"aid": aid, "multiply": num, "select_like": 0, "csrf": self.config.get("BILI_JCT","")})
             return d.get("code") == 0
-        except: return False
+        except Exception: return False
 
     async def _fav_video(self, aid):
         try:
@@ -2176,13 +2248,13 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
             fav_id = fav_list[0]["id"]
             d2, _ = await self._http_post("https://api.bilibili.com/x/v3/fav/resource/deal", data={"rid": aid, "type": 2, "add_media_ids": fav_id, "csrf": self.config.get("BILI_JCT","")})
             return d2.get("code") == 0
-        except: return False
+        except Exception: return False
 
     async def _follow_user(self, mid):
         try:
             d, _ = await self._http_post("https://api.bilibili.com/x/relation/modify", data={"fid": mid, "act": 1, "re_src": 11, "csrf": self.config.get("BILI_JCT","")})
             return d.get("code") == 0
-        except: return False
+        except Exception: return False
 
     async def _run_proactive(self, max_watch=None, max_comment=None):
         """主动刷B站：看视频、评价、点赞/投币/收藏/关注/评论"""
@@ -2206,7 +2278,8 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
         if not is_manual:
             today_watched = [l for l in watch_log if l.get("time","").startswith(today_str) and not l.get("manual")]
             if len(today_watched) >= daily_watch:
-                logger.info(f"[BiliBot] 今天已看 {len(today_watched)} 个视频，不再刷"); return
+                logger.info(f"[BiliBot] 今天已看 {len(today_watched)} 个视频，不再刷")
+                return
         logger.info(f"[BiliBot] 🎯 主动刷B站 | 目标：看 {daily_watch} 个视频，评论 {daily_comment} 条")
         external_memory = self._load_json(EXTERNAL_MEMORY_FILE, {})
         commented_videos = set(self._load_json(COMMENTED_FILE, []))
@@ -2232,7 +2305,7 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
                 pubdate = video.get("pubdate", 0)
                 if isinstance(pubdate, str):
                     try: pubdate = int(pubdate)
-                    except: pubdate = 0
+                    except Exception: pubdate = 0
                 if pubdate and datetime.fromtimestamp(pubdate).date() == today:
                     target_videos.append(video)
                     logger.info(f"[BiliBot] 🔔 今日更新：{video['up_name']} - {video['title']}")
@@ -2243,7 +2316,8 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
                 target_videos.append(v)
         # 4. 分区最新兜底
         if len(target_videos) < daily_watch:
-            tids = list(self.PREFERRED_TIDS); random.shuffle(tids)
+            tids = list(self.PREFERRED_TIDS)
+            random.shuffle(tids)
             for tid in tids[:3]:
                 if len(target_videos) >= daily_watch + 5: break
                 fallback = await self._get_newlist_videos(tid, min_pubdate_hot)
@@ -2252,14 +2326,19 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
                         target_videos.append(v)
         # 去重 + 随机
         logger.info(f"[BiliBot] 📊 视频来源统计：特别关注={len(special_mids)}个UP | 关注列表={len(following_mids)}个UP | 收集到={len(target_videos)}个视频")
-        seen = set(); unique = []
+        seen = set()
+        unique = []
         for v in target_videos:
-            if v["bvid"] not in seen: seen.add(v["bvid"]); unique.append(v)
+            if v["bvid"] not in seen: seen.add(v["bvid"])
+            unique.append(v)
         sc = len(special_mids)
         if len(unique) > sc:
-            tail = unique[sc:]; random.shuffle(tail); unique = unique[:sc] + tail
+            tail = unique[sc:]
+            random.shuffle(tail)
+            unique = unique[:sc] + tail
         logger.info(f"[BiliBot] 📋 共找到 {len(unique)} 个视频")
-        watch_count = 0; comment_count = 0
+        watch_count = 0
+        comment_count = 0
         for video in unique:
             if watch_count >= daily_watch: break
             bvid = video["bvid"]
@@ -2287,7 +2366,10 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
             if not evaluation:
                 logger.warning("[BiliBot] 评价失败，跳过互动")
                 watch_log.append({"time": datetime.now().strftime("%Y-%m-%d %H:%M"), "bvid": bvid, "title": video.get("title",""), "up_name": video.get("up_name",""), "score": 0, "mood": "未知", "comment": "评价失败", "review": "", "actions": [], "pic": video.get("pic",""), "manual": is_manual})
-                self._save_json(WATCH_LOG_FILE, watch_log[-200:]); watched_bvids.add(bvid); watch_count += 1; continue
+                self._save_json(WATCH_LOG_FILE, watch_log[-200:])
+                watched_bvids.add(bvid)
+                watch_count += 1
+                continue
             score = evaluation.get("score", 5)
             comment = evaluation.get("comment", "")
             mood = evaluation.get("mood", "平静")
@@ -2298,17 +2380,22 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
             actions = []
             if oid:
                 if score >= 6 and self.config.get("PROACTIVE_LIKE", True):
-                    if await self._like_video(oid): actions.append("👍点赞"); logger.info("[BiliBot] 👍 点赞成功")
+                    if await self._like_video(oid): actions.append("👍点赞")
+                    logger.info("[BiliBot] 👍 点赞成功")
                 if score >= 8 and self.config.get("PROACTIVE_COIN", False):
-                    if await self._coin_video(oid): actions.append("🪙投币"); logger.info("[BiliBot] 🪙 投币成功")
+                    if await self._coin_video(oid): actions.append("🪙投币")
+                    logger.info("[BiliBot] 🪙 投币成功")
                 if score >= 8 and self.config.get("PROACTIVE_FAV", True):
-                    if await self._fav_video(oid): actions.append("⭐收藏"); logger.info("[BiliBot] ⭐ 收藏成功")
+                    if await self._fav_video(oid): actions.append("⭐收藏")
+                    logger.info("[BiliBot] ⭐ 收藏成功")
                 if score >= 7 and comment_count < daily_comment and self.config.get("PROACTIVE_COMMENT", True):
                     proactive_comment = await self._generate_proactive_comment(analysis_info, video_description)
                     if await self._send_comment(oid, proactive_comment):
-                        actions.append("💬评论"); comment_count += 1
+                        actions.append("💬评论")
+                        comment_count += 1
                         logger.info(f"[BiliBot] 💬 评论成功：{proactive_comment}")
-                        commented_videos.add(bvid); self._save_json(COMMENTED_FILE, list(commented_videos))
+                        commented_videos.add(bvid)
+                        self._save_json(COMMENTED_FILE, list(commented_videos))
                         # 保存主动评论日志
                         pl = self._load_json(PROACTIVE_LOG_FILE, [])
                         pl.append({"time": datetime.now().strftime("%Y-%m-%d %H:%M"), "bvid": bvid, "title": video.get("title",""), "comment": proactive_comment})
@@ -2332,16 +2419,19 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
                             rec_text = re.sub(rf'^({"|".join(_name_patterns)})[，,\s]*', '', rec_text)
                             rec_msg = f"@{owner_bili} {rec_text}"
                             if await self._send_comment(oid, rec_msg):
-                                actions.append("📢推荐给主人"); logger.info(f"[BiliBot] 📢 已@主人：{rec_msg}")
-                        except: pass
+                                actions.append("📢推荐给主人")
+                                logger.info(f"[BiliBot] 📢 已@主人：{rec_msg}")
+                        except Exception: pass
             # 关注UP主
             if (score >= 9 or want_follow) and self.config.get("PROACTIVE_FOLLOW", True):
                 if str(video.get("up_mid","")) != str(self.config.get("OWNER_MID","")):
                     if await self._follow_user(video["up_mid"]):
-                        actions.append("➕关注"); logger.info(f"[BiliBot] ➕ 关注了 {video.get('up_name','')}")
+                        actions.append("➕关注")
+                        logger.info(f"[BiliBot] ➕ 关注了 {video.get('up_name','')}")
             # 保存观影日记
             log_entry = {"time": datetime.now().strftime("%Y-%m-%d %H:%M"), "bvid": bvid, "title": video.get("title",""), "up_name": video.get("up_name",""), "up_mid": str(video.get("up_mid","")), "score": score, "mood": mood, "comment": comment, "review": review, "actions": actions, "pic": video.get("pic",""), "manual": is_manual}
-            watch_log.append(log_entry); self._save_json(WATCH_LOG_FILE, watch_log[-200:])
+            watch_log.append(log_entry)
+            self._save_json(WATCH_LOG_FILE, watch_log[-200:])
             memory_text = (
                 f"[{log_entry['time']}] Bot看了视频《{video.get('title','')}》"
                 f"(UP主:{video.get('up_name','')}) "
@@ -2349,12 +2439,13 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
                 f"感想:{review[:80]} "
                 f"内容:{video_description[:120]}"
             )
-            self._save_self_memory_record("proactive_watch", memory_text, memory_type="video", extra={"bvid": bvid, "owner_mid": str(video.get("up_mid","")), "video_title": video.get("title","")})
+            await self._save_self_memory_record("proactive_watch", memory_text, memory_type="video", extra={"bvid": bvid, "owner_mid": str(video.get("up_mid","")), "video_title": video.get("title","")})
             # 存入外部记忆
             if bvid not in external_memory:
                 external_memory[bvid] = {"title": video.get("title",""), "up_name": video.get("up_name",""), "up_mid": str(video.get("up_mid","")), "description": video_description, "score": score, "mood": mood, "review": review, "watched_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "comments": []}
                 self._save_json(EXTERNAL_MEMORY_FILE, external_memory)
-            watched_bvids.add(bvid); watch_count += 1
+            watched_bvids.add(bvid)
+            watch_count += 1
             action_str = " ".join(actions) if actions else "（默默看完）"
             logger.info(f"[BiliBot] 📊 互动：{action_str}")
             wait = random.randint(30, 120)
@@ -2366,40 +2457,68 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
     @filter.command("bili登录")
     async def cmd_login(self, event: AstrMessageEvent):
         qr_url, qrcode_key = await self._qr_login_generate()
-        if not qr_url: yield event.plain_result("❌ 生成二维码失败"); return
+        if not qr_url:
+            yield event.plain_result("❌ 生成二维码失败")
+            return
         self._login_qrcode_key = qrcode_key
         import qrcode; qr=qrcode.QRCode(version=1,box_size=8,border=2); qr.add_data(qr_url); qr.make(fit=True)
-        img=qr.make_image(fill_color="black",back_color="white"); buf=io.BytesIO(); img.save(buf,format="PNG"); buf.seek(0)
+        img=qr.make_image(fill_color="black",back_color="white")
+        buf=io.BytesIO()
+        img.save(buf,format="PNG")
+        buf.seek(0)
         qr_path=os.path.join(DATA_DIR,"login_qr.png")
         with open(qr_path,"wb") as f: f.write(buf.getvalue())
         yield event.chain_result([Plain("📱 请用B站APP扫描下方二维码：\n扫码后发送 /bili确认"), Image.fromFileSystem(qr_path)])
     @filter.command("bili确认")
     async def cmd_login_confirm(self, event: AstrMessageEvent):
-        if not self._login_qrcode_key: yield event.plain_result("❌ 没有待确认的登录"); return
+        if not self._login_qrcode_key:
+            yield event.plain_result("❌ 没有待确认的登录")
+            return
         for i in range(3):
             code,msg,cookies = await self._qr_login_poll(self._login_qrcode_key)
             if code==0:
                 for k,ck in [("SESSDATA","SESSDATA"),("BILI_JCT","bili_jct"),("DEDE_USER_ID","DedeUserID"),("REFRESH_TOKEN","REFRESH_TOKEN")]:
-                    if cookies.get(ck): self.config[k]=cookies[ck]
-                self.config.save_config(); self._login_qrcode_key=None
-                valid,info=await self.check_cookie(); yield event.plain_result(f"✅ 登录成功！\n{info}")
-                if not self._running: await self._start_bot(); yield event.plain_result("🚀 后台任务已自动启动")
+                    if cookies.get(ck):
+                        self.config[k]=cookies[ck]
+                self.config.save_config()
+                self._login_qrcode_key=None
+                valid,info=await self.check_cookie()
+                yield event.plain_result(f"✅ 登录成功！\n{info}")
+                if not self._running:
+                    await self._start_bot()
+                    yield event.plain_result("🚀 后台任务已自动启动")
                 return
-            elif code==86090: yield event.plain_result(f"📱 {msg}"); await asyncio.sleep(2)
-            elif code==86101: yield event.plain_result(f"⏳ {msg}"); await asyncio.sleep(3)
-            elif code==86038: self._login_qrcode_key=None; yield event.plain_result(f"❌ {msg}，请重新 /bili登录"); return
-            else: yield event.plain_result(f"❌ {msg}"); return
+            elif code==86090:
+                yield event.plain_result(f"📱 {msg}")
+                await asyncio.sleep(2)
+            elif code==86101:
+                yield event.plain_result(f"⏳ {msg}")
+                await asyncio.sleep(3)
+            elif code==86038:
+                self._login_qrcode_key=None
+                yield event.plain_result(f"❌ {msg}，请重新 /bili登录")
+                return
+            else:
+                yield event.plain_result(f"❌ {msg}")
+                return
         yield event.plain_result("⏳ 还没确认成功，请在手机上确认后再发 /bili确认")
     @filter.command("bili状态")
     async def cmd_status(self, event: AstrMessageEvent):
-        valid,info=await self.check_cookie(); mood,_=self._get_today_mood()
+        valid,info=await self.check_cookie()
+        mood,_=self._get_today_mood()
         env = self._get_environment_status()
         cmd_status = env["external_commands"]
         feature_status = env["features"]
-        mc=len(self._memory); pc=len(self._load_json(USER_PROFILE_FILE,{})); pmc=len(self._load_json(PERMANENT_MEMORY_FILE,[]))
-        evo=self._load_json(PERSONALITY_FILE,{}); evo_ver=evo.get("version",0); evo_last=evo.get("last_evolve","从未")
-        wl=self._load_json(WATCH_LOG_FILE,[]); today_watched=len([l for l in wl if l.get("time","").startswith(datetime.now().strftime("%Y-%m-%d"))])
-        dl=self._load_json(DYNAMIC_LOG_FILE,[]); today_dynamic=len([l for l in dl if l.get("time","").startswith(datetime.now().strftime("%Y-%m-%d"))])
+        mc=len(self._memory)
+        pc=len(self._load_json(USER_PROFILE_FILE,{}))
+        pmc=len(self._load_json(PERMANENT_MEMORY_FILE,[]))
+        evo=self._load_json(PERSONALITY_FILE,{})
+        evo_ver=evo.get("version",0)
+        evo_last=evo.get("last_evolve","从未")
+        wl=self._load_json(WATCH_LOG_FILE,[])
+        today_watched=len([l for l in wl if l.get("time","").startswith(datetime.now().strftime("%Y-%m-%d"))])
+        dl=self._load_json(DYNAMIC_LOG_FILE,[])
+        today_dynamic=len([l for l in dl if l.get("time","").startswith(datetime.now().strftime("%Y-%m-%d"))])
         schedule = self._get_schedule_snapshot()
         lines = [
             f"📺 BiliBot 1.1.1 状态","━━━━━━━━━━━━",f"🍪 {info}",
@@ -2453,13 +2572,21 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
             yield event.plain_result(text)
     @filter.command("bili启动")
     async def cmd_start(self, event: AstrMessageEvent):
-        if self._running: yield event.plain_result("⚠️ 已在运行"); return
-        if not self._has_cookie(): yield event.plain_result("❌ 请先 /bili登录"); return
-        await self._start_bot(); yield event.plain_result("🚀 已启动！")
+        if self._running:
+            yield event.plain_result("⚠️ 已在运行")
+            return
+        if not self._has_cookie():
+            yield event.plain_result("❌ 请先 /bili登录")
+            return
+        await self._start_bot()
+        yield event.plain_result("🚀 已启动！")
     @filter.command("bili停止")
     async def cmd_stop(self, event: AstrMessageEvent):
-        if not self._running: yield event.plain_result("⚠️ 没在运行"); return
-        await self._stop_bot(); yield event.plain_result("⏹️ 已停止")
+        if not self._running:
+            yield event.plain_result("⚠️ 没在运行")
+            return
+        await self._stop_bot()
+        yield event.plain_result("⏹️ 已停止")
     @filter.command("bili主动")
     async def cmd_proactive(self, event: AstrMessageEvent):
         if not self._has_cookie():
@@ -2511,16 +2638,23 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
         if len(parts)<2:
             tm = {"回复":"ENABLE_REPLY","主动":"ENABLE_PROACTIVE","动态":"ENABLE_DYNAMIC","好感":"ENABLE_AFFECTION","心情":"ENABLE_MOOD","演化":"ENABLE_PERSONALITY_EVOLUTION","点赞":"PROACTIVE_LIKE","投币":"PROACTIVE_COIN","收藏":"PROACTIVE_FAV","关注":"PROACTIVE_FOLLOW","评论":"PROACTIVE_COMMENT"}
             lines = ["可切换功能："] + [f"  {n} ({'✅' if self.config.get(k,True) else '❌'})" for n,k in tm.items()] + ["","用法: /bili开关 回复"]
-            yield event.plain_result("\n".join(lines)); return
+            yield event.plain_result("\n".join(lines))
+            return
         name=parts[1].strip()
         tm = {"回复":"ENABLE_REPLY","主动":"ENABLE_PROACTIVE","动态":"ENABLE_DYNAMIC","好感":"ENABLE_AFFECTION","心情":"ENABLE_MOOD","演化":"ENABLE_PERSONALITY_EVOLUTION","点赞":"PROACTIVE_LIKE","投币":"PROACTIVE_COIN","收藏":"PROACTIVE_FAV","关注":"PROACTIVE_FOLLOW","评论":"PROACTIVE_COMMENT"}
         key=tm.get(name)
-        if not key: yield event.plain_result(f"❌ 不认识：{name}"); return
-        cur=self.config.get(key,True); self.config[key]=not cur; self.config.save_config()
+        if not key:
+            yield event.plain_result(f"❌ 不认识：{name}")
+            return
+        cur=self.config.get(key,True)
+        self.config[key]=not cur
+        self.config.save_config()
         yield event.plain_result(f"{name}: {'✅ 已开启' if not cur else '❌ 已关闭'}")
     @filter.command("bili刷新")
     async def cmd_refresh_cookie(self, event: AstrMessageEvent):
-        yield event.plain_result("🔄 刷新中..."); _,msg=await self.refresh_cookie(); yield event.plain_result(msg)
+        yield event.plain_result("🔄 刷新中...")
+        _,msg=await self.refresh_cookie()
+        yield event.plain_result(msg)
     @filter.command("bili记忆")
     async def cmd_memory(self, event: AstrMessageEvent):
         parts = event.message_str.strip().split(maxsplit=2)
@@ -2535,7 +2669,9 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
             "压缩": {"user_summary"},
         }
         if len(parts)<2:
-            mc=len(self._memory); bc=len([m for m in self._memory if m.get("source")=="bilibili"]); qc=len([m for m in self._memory if m.get("source")=="qq"])
+            mc=len(self._memory)
+            bc=len([m for m in self._memory if m.get("source")=="bilibili"])
+            qc=len([m for m in self._memory if m.get("source")=="qq"])
             chat_count = len([m for m in self._memory if self._match_memory_type(m, {"chat"})])
             video_count = len([m for m in self._memory if self._match_memory_type(m, {"video"})])
             dynamic_count = len([m for m in self._memory if self._match_memory_type(m, {"dynamic"})])
@@ -2564,8 +2700,10 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
                 memory_types = type_alias[arg]
             else:
                 source = arg
-        results = self._search_memories(query, limit=5, source=source, memory_types=memory_types)
-        if not results: yield event.plain_result(f"🧠 没找到「{query}」的记忆"); return
+        results = await self._search_memories(query, limit=5, source=source, memory_types=memory_types)
+        if not results:
+            yield event.plain_result(f"🧠 没找到「{query}」的记忆")
+            return
         suffix = f"（{arg}）" if arg else ""
         lines = [f"🧠 关于「{query}」的记忆{suffix}：",""]
         for i,r in enumerate(results,1): lines.append(f"{i}. {r[:150]+'...' if len(r)>150 else r}")
@@ -2590,7 +2728,7 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
         selected_source = source.strip() or None
         if selected_source == "all":
             selected_source = None
-        results = self._search_memories(query, limit=5, source=selected_source, memory_types=selected_types)
+        results = await self._search_memories(query, limit=5, source=selected_source, memory_types=selected_types)
         if not results:
             return f"没有找到与「{query}」相关的记忆。"
         return "\n".join([f"{i}. {r}" for i, r in enumerate(results, 1)])
@@ -2614,27 +2752,39 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
     async def cmd_affection(self, event: AstrMessageEvent):
         parts = event.message_str.strip().split(maxsplit=1)
         if len(parts)>=2:
-            uid=parts[1].strip(); sc=self._affection.get(uid,0); lv=self._get_level(sc,uid)
+            uid=parts[1].strip()
+            sc=self._affection.get(uid,0)
+            lv=self._get_level(sc,uid)
             p=self._load_json(USER_PROFILE_FILE,{}).get(uid,{})
             lines=[f"👤 用户 {uid}",f"💛 {sc}分 | {LEVEL_NAMES[lv]}",f"📝 {p.get('impression','暂无')}"]
             if p.get("facts"): lines.append(f"📋 {'；'.join(p['facts'][-5:])}")
-            yield event.plain_result("\n".join(lines)); return
-        if not self._affection: yield event.plain_result("💛 无记录"); return
+            yield event.plain_result("\n".join(lines))
+            return
+        if not self._affection:
+            yield event.plain_result("💛 无记录")
+            return
         sa=sorted(self._affection.items(),key=lambda x:x[1],reverse=True)[:10]
         lines=["💛 好感度 Top 10","━━━━━━━━━━━━"]
         ps=self._load_json(USER_PROFILE_FILE,{})
         for i,(uid,sc) in enumerate(sa,1):
-            lv=self._get_level(sc,uid); imp=ps.get(uid,{}).get("impression","")
+            lv=self._get_level(sc,uid)
+            imp=ps.get(uid,{}).get("impression","")
             lines.append(f"{i}. UID:{uid} | {sc}分 {LEVEL_NAMES[lv]}{' — '+imp[:20] if imp else ''}")
         yield event.plain_result("\n".join(lines))
     @filter.command("bili拉黑")
     async def cmd_block(self, event: AstrMessageEvent):
         """手动拉黑用户。用法: /bili拉黑 <UID>"""
         parts = event.message_str.strip().split(maxsplit=1)
-        if len(parts)<2: yield event.plain_result("用法: /bili拉黑 <UID>"); return
+        if len(parts)<2:
+            yield event.plain_result("用法: /bili拉黑 <UID>")
+            return
         uid=parts[1].strip()
-        if not uid.isdigit(): yield event.plain_result("❌ UID必须是数字"); return
-        if self._is_owner(uid): yield event.plain_result("❌ 不能拉黑主人！"); return
+        if not uid.isdigit():
+            yield event.plain_result("❌ UID必须是数字")
+            return
+        if self._is_owner(uid):
+            yield event.plain_result("❌ 不能拉黑主人！")
+            return
         success = await self._block_user(int(uid))
         bl = self._load_json(os.path.join(DATA_DIR,"block_log.json"),{})
         bl[uid] = {"username":"手动拉黑","reason":"手动拉黑","time":datetime.now().strftime("%Y-%m-%d %H:%M")}
@@ -2644,24 +2794,32 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
     async def cmd_unblock(self, event: AstrMessageEvent):
         """解除拉黑。用法: /bili解黑 <UID>"""
         parts = event.message_str.strip().split(maxsplit=1)
-        if len(parts)<2: yield event.plain_result("用法: /bili解黑 <UID>"); return
+        if len(parts)<2:
+            yield event.plain_result("用法: /bili解黑 <UID>")
+            return
         uid=parts[1].strip()
         bl = self._load_json(os.path.join(DATA_DIR,"block_log.json"),{})
-        if uid not in bl: yield event.plain_result(f"⚠️ UID:{uid} 不在黑名单中"); return
+        if uid not in bl:
+            yield event.plain_result(f"⚠️ UID:{uid} 不在黑名单中")
+            return
         # B站解除拉黑: act=6
         try:
             d, _ = await self._http_post("https://api.bilibili.com/x/relation/modify", data={"fid":uid,"act":6,"re_src":11,"csrf":self.config.get("BILI_JCT","")})
             api_ok = d["code"]==0
-        except: api_ok=False
-        del bl[uid]; self._save_json(os.path.join(DATA_DIR,"block_log.json"), bl)
+        except Exception: api_ok=False
+        del bl[uid]
+        self._save_json(os.path.join(DATA_DIR,"block_log.json"), bl)
         # 重置好感度为0
-        self._affection[uid] = 0; self._save_json(AFFECTION_FILE, self._affection)
+        self._affection[uid] = 0
+        self._save_json(AFFECTION_FILE, self._affection)
         yield event.plain_result(f"✅ 已解除拉黑 UID:{uid}，好感度重置为0{'' if api_ok else '（B站API失败，但已从本地黑名单移除）'}")
     @filter.command("bili黑名单")
     async def cmd_blocklist(self, event: AstrMessageEvent):
         """查看拉黑名单"""
         bl = self._load_json(os.path.join(DATA_DIR,"block_log.json"),{})
-        if not bl: yield event.plain_result("🚫 黑名单为空"); return
+        if not bl:
+            yield event.plain_result("🚫 黑名单为空")
+            return
         lines = ["🚫 黑名单","━━━━━━━━━━━━"]
         for uid,info in bl.items():
             lines.append(f"UID:{uid} | {info.get('reason','未知')} | {info.get('time','')}")
@@ -2702,7 +2860,8 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
         """查看性格演化记录。用法: /bili性格"""
         evo = self._load_json(PERSONALITY_FILE, {})
         if not evo:
-            yield event.plain_result("🌱 还没有性格演化记录"); return
+            yield event.plain_result("🌱 还没有性格演化记录")
+            return
         lines = ["🌱 性格演化", "━━━━━━━━━━━━"]
         traits = evo.get("evolved_traits", [])
         if traits:
@@ -2731,7 +2890,8 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
         /bili性格编辑 变化 <内容> — 添加成长变化"""
         parts = event.message_str.strip().split(maxsplit=2)
         if len(parts) < 3:
-            yield event.plain_result("用法：\n/bili性格编辑 习惯 <内容>\n/bili性格编辑 看法 <内容>\n/bili性格编辑 变化 <内容>"); return
+            yield event.plain_result("用法：\n/bili性格编辑 习惯 <内容>\n/bili性格编辑 看法 <内容>\n/bili性格编辑 变化 <内容>")
+            return
         category, content = parts[1].strip(), parts[2].strip()
         evo = self._load_json(PERSONALITY_FILE, {})
         if not evo: evo = {"version":0,"last_evolve":"","evolved_traits":[],"speech_habits":[],"opinions":[],"last_reflection":""}
@@ -2748,7 +2908,8 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
             evo["evolved_traits"] = evo["evolved_traits"][-10:]
             yield event.plain_result(f"✅ 已添加成长变化：{content}")
         else:
-            yield event.plain_result("❌ 类别不对，可选：习惯、看法、变化"); return
+            yield event.plain_result("❌ 类别不对，可选：习惯、看法、变化")
+            return
         evo["version"] = evo.get("version", 0) + 1
         self._save_json(PERSONALITY_FILE, evo)
 
@@ -2760,21 +2921,26 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
         /bili性格删除 变化 <序号>"""
         parts = event.message_str.strip().split(maxsplit=2)
         if len(parts) < 3:
-            yield event.plain_result("用法：/bili性格删除 <习惯|看法|变化> <序号>"); return
+            yield event.plain_result("用法：/bili性格删除 <习惯|看法|变化> <序号>")
+            return
         category, idx_str = parts[1].strip(), parts[2].strip()
         if not idx_str.isdigit():
-            yield event.plain_result("❌ 序号必须是数字"); return
+            yield event.plain_result("❌ 序号必须是数字")
+            return
         idx = int(idx_str) - 1
         evo = self._load_json(PERSONALITY_FILE, {})
         if not evo:
-            yield event.plain_result("🌱 没有演化记录"); return
+            yield event.plain_result("🌱 没有演化记录")
+            return
         key_map = {"习惯": "speech_habits", "看法": "opinions", "变化": "evolved_traits"}
         key = key_map.get(category)
         if not key:
-            yield event.plain_result("❌ 类别不对，可选：习惯、看法、变化"); return
+            yield event.plain_result("❌ 类别不对，可选：习惯、看法、变化")
+            return
         items = evo.get(key, [])
         if idx < 0 or idx >= len(items):
-            yield event.plain_result(f"❌ 序号超范围（1-{len(items)}）"); return
+            yield event.plain_result(f"❌ 序号超范围（1-{len(items)}）")
+            return
         removed = items.pop(idx)
         evo["version"] = evo.get("version", 0) + 1
         self._save_json(PERSONALITY_FILE, evo)
@@ -2793,7 +2959,8 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
         pl = self._load_json(PROACTIVE_LOG_FILE, [])
         today_comment = [l for l in pl if l.get("time", "").startswith(target_date)]
         if not today_watch and not today_comment:
-            yield event.plain_result(f"📋 {target_date} 没有主动行为记录"); return
+            yield event.plain_result(f"📋 {target_date} 没有主动行为记录")
+            return
         lines = [f"📋 {target_date} 主动行为日志", "━━━━━━━━━━━━"]
         if today_watch:
             lines.append(f"\n🎬 看了 {len(today_watch)} 个视频：")
@@ -2820,15 +2987,19 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
         if len(parts) >= 3 and parts[1] == "删除":
             idx_str = parts[2].strip()
             if not idx_str.isdigit():
-                yield event.plain_result("❌ 序号必须是数字"); return
+                yield event.plain_result("❌ 序号必须是数字")
+                return
             idx = int(idx_str) - 1
             if idx < 0 or idx >= len(perm):
-                yield event.plain_result(f"❌ 序号超范围（1-{len(perm)}）"); return
+                yield event.plain_result(f"❌ 序号超范围（1-{len(perm)}）")
+                return
             removed = perm.pop(idx)
             self._save_json(PERMANENT_MEMORY_FILE, perm)
-            yield event.plain_result(f"✅ 已删除永久记忆：{removed.get('text','')[:50]}"); return
+            yield event.plain_result(f"✅ 已删除永久记忆：{removed.get('text','')[:50]}")
+            return
         if not perm:
-            yield event.plain_result("💎 还没有永久记忆"); return
+            yield event.plain_result("💎 还没有永久记忆")
+            return
         lines = [f"💎 永久记忆（{len(perm)}/20）", "━━━━━━━━━━━━"]
         for i, p in enumerate(perm, 1):
             lines.append(f"  {i}. [{p.get('time','?')}] {p.get('text','')[:80]}")
@@ -2839,7 +3010,8 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
     async def cmd_dynamic(self, event: AstrMessageEvent):
         """手动发布动态"""
         if not self._has_cookie():
-            yield event.plain_result("❌ 请先 /bili登录"); return
+            yield event.plain_result("❌ 请先 /bili登录")
+            return
         yield event.plain_result("📢 正在发布动态...")
         await self._run_dynamic()
         yield event.plain_result("📢 动态发布流程已完成，请查看日志")
@@ -2849,7 +3021,8 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
         """查看动态发布日志"""
         log = self._load_json(DYNAMIC_LOG_FILE, [])
         if not log:
-            yield event.plain_result("📝 还没有动态记录"); return
+            yield event.plain_result("📝 还没有动态记录")
+            return
         lines = ["📝 最近动态记录", "━━━━━━━━━━━━"]
         for i, l in enumerate(log[-10:], 1):
             img = "🖼️" if l.get("has_image") else "📄"
@@ -2867,10 +3040,12 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
         """绑定QQ与B站UID: /bili绑定 12345"""
         parts = event.message_str.strip().split()
         if len(parts) < 2:
-            yield event.plain_result("用法：/bili绑定 <B站UID>"); return
+            yield event.plain_result("用法：/bili绑定 <B站UID>")
+            return
         bili_uid = parts[1].strip()
         if not bili_uid.isdigit():
-            yield event.plain_result("⚠️ B站UID应为数字"); return
+            yield event.plain_result("⚠️ B站UID应为数字")
+            return
         qq_id = str(event.get_sender_id())
         bindings = self._load_json(BINDING_FILE, {})
         bindings[qq_id] = bili_uid
@@ -2882,7 +3057,8 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
         qq_id = str(event.get_sender_id())
         bindings = self._load_json(BINDING_FILE, {})
         if qq_id not in bindings:
-            yield event.plain_result("⚠️ 你还没有绑定B站UID"); return
+            yield event.plain_result("⚠️ 你还没有绑定B站UID")
+            return
         del bindings[qq_id]
         self._save_json(BINDING_FILE, bindings)
         yield event.plain_result("✅ 已解除绑定")
@@ -2902,7 +3078,7 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
             bili_uid = bindings[qq_id]
             perm = self._load_json(PERMANENT_MEMORY_FILE, [])
             perm_texts = [f"[{p.get('time','?')}] {p['text']}" for p in perm[-10:] if p.get("text")]
-            semantic_texts = self._get_user_semantic_memories(bili_uid, msg)
+            semantic_texts = await self._get_user_semantic_memories(bili_uid, msg)
             if not perm_texts and not semantic_texts:
                 return
             sections = []
@@ -2933,7 +3109,7 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
             username = event.get_sender_name() or qq_id
             bili_uid = bindings[qq_id]
             text = f"[QQ|{now}] {username}说：{user_msg[:100]} | 回复：{ai_reply[:100]}"
-            emb = self._get_embedding(text)
+            emb = await self._get_embedding(text)
             rec = {"rpid": f"qq_{int(datetime.now().timestamp())}","thread_id":"qq","user_id":bili_uid,"time":now,"text":text,"source":"qq"}
             if emb: rec["embedding"] = emb
             qq_mem = self._load_json(QQ_MEMORY_FILE, [])
@@ -2947,17 +3123,25 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
     async def _auto_start(self):
         await asyncio.sleep(3)
         valid,_=await self.check_cookie()
-        if valid: await self._start_bot(); logger.info("[BiliBot] 自动启动")
-        else: logger.warning("[BiliBot] Cookie无效")
+        if valid:
+            await self._start_bot()
+            logger.info("[BiliBot] 自动启动")
+        else:
+            logger.warning("[BiliBot] Cookie无效")
     async def _start_bot(self):
         if self._running: return
         self._mark_overdue_schedule_as_triggered_on_startup()
-        self._running=True; self._task=asyncio.create_task(self._main_loop()); logger.info("[BiliBot] 启动")
+        self._running=True
+        self._task=asyncio.create_task(self._main_loop())
+        logger.info("[BiliBot] 启动")
     async def _stop_bot(self):
         self._running=False
-        if self._task: self._task.cancel(); self._task=None
-        if self._proactive_task and not self._proactive_task.done(): self._proactive_task.cancel(); self._proactive_task=None
-        if self._dynamic_task and not self._dynamic_task.done(): self._dynamic_task.cancel(); self._dynamic_task=None
+        if self._task: self._task.cancel()
+        self._task=None
+        if self._proactive_task and not self._proactive_task.done(): self._proactive_task.cancel()
+        self._proactive_task=None
+        if self._dynamic_task and not self._dynamic_task.done(): self._dynamic_task.cancel()
+        self._dynamic_task=None
         logger.info("[BiliBot] 停止")
     async def _main_loop(self):
         logger.info("[BiliBot] 主循环开始")
@@ -2965,10 +3149,15 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
             try:
                 # 性格演化（独立于休眠）
                 await self._maybe_evolve_personality()
-                h=datetime.now().hour; ss=self.config.get("SLEEP_START",2); se=self.config.get("SLEEP_END",8)
-                if ss<=h<se: await asyncio.sleep(60); continue
+                h=datetime.now().hour
+                ss=self.config.get("SLEEP_START",2)
+                se=self.config.get("SLEEP_END",8)
+                if ss<=h<se:
+                    await asyncio.sleep(60)
+                    continue
                 ci=self.config.get("COOKIE_CHECK_INTERVAL",6)*3600
-                if time.time()-self._last_cookie_check>ci: await self._check_and_refresh_cookie(); self._last_cookie_check=time.time()
+                if time.time()-self._last_cookie_check>ci: await self._check_and_refresh_cookie()
+                self._last_cookie_check=time.time()
                 # 主动视频调度
                 if self.config.get("ENABLE_PROACTIVE", False):
                     now_dt = datetime.now()
@@ -3011,15 +3200,19 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
                 if self.config.get("ENABLE_REPLY",True):
                     await self._poll_unified()
                 await asyncio.sleep(self.config.get("POLL_INTERVAL",20))
-            except asyncio.CancelledError: break
-            except Exception as e: logger.error(f"[BiliBot] 主循环出错: {e}\n{traceback.format_exc()}"); await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[BiliBot] 主循环出错: {e}\n{traceback.format_exc()}")
+                await asyncio.sleep(30)
         self._running=False
     async def _check_and_refresh_cookie(self):
         valid,info=await self.check_cookie()
         if valid: logger.info(f"[BiliBot] Cookie OK: {info}"); return
         logger.warning(f"[BiliBot] Cookie 失效: {info}")
         if self.config.get("COOKIE_AUTO_REFRESH",True):
-            ok,msg=await self.refresh_cookie(); logger.info(f"[BiliBot] 刷新{'成功' if ok else '失败'}: {msg}")
+            ok,msg=await self.refresh_cookie()
+            logger.info(f"[BiliBot] 刷新{'成功' if ok else '失败'}: {msg}")
     async def _apply_reply_result(self, *, mid, username, content, oid, rpid, comment_type, thread_id, result):
         cs = self._affection.get(str(mid), 0)
         ai_reply = result["reply"]
@@ -3077,7 +3270,7 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
         logger.info(f"[BiliBot] 💬 {username}: {ai_reply[:50]}")
         success = await self._send_reply(oid, rpid, comment_type, ai_reply)
         if success:
-            self._save_memory_record(rpid, thread_id, mid, username, content, ai_reply)
+            await self._save_memory_record(rpid, thread_id, mid, username, content, ai_reply)
             await self._compress_thread_memory(thread_id)
             await self._compress_user_memory(mid, username)
         return success

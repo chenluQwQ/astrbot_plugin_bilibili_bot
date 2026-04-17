@@ -4,8 +4,10 @@ BiliBot Web Panel - 管理面板模块
 """
 import os
 import json
+import hmac
 import asyncio
 import hashlib
+import secrets
 from datetime import datetime
 from aiohttp import web
 from astrbot.api import logger
@@ -64,15 +66,14 @@ class WebPanel:
         try:
             data = await request.json()
             pwd = data.get('password', '')
-            if hashlib.sha256(pwd.encode()).hexdigest() == self.password_hash:
-                import secrets
+            if hmac.compare_digest(hashlib.sha256(pwd.encode()).hexdigest(), self.password_hash):
                 token = secrets.token_hex(16)
                 self.sessions.add(token)
                 resp = self._json_response({'ok': True})
                 resp.set_cookie('bili_token', token, max_age=86400)
                 return resp
             return self._json_response({'ok': False, 'error': '密码错误'}, 401)
-        except:
+        except Exception: 
             return self._json_response({'ok': False, 'error': '请求错误'}, 400)
     
     async def handle_auth_check(self, request):
@@ -85,7 +86,7 @@ class WebPanel:
         if not self._check_auth(request):
             return self._json_response({'error': '未登录'}, 401)
         p = self.plugin
-        from .main import MEMORY_FILE, PERMANENT_MEMORY_FILE, USER_PROFILE_FILE, PERSONALITY_FILE, WATCH_LOG_FILE, DYNAMIC_LOG_FILE
+        from .core.config import MEMORY_FILE, PERMANENT_MEMORY_FILE, USER_PROFILE_FILE, PERSONALITY_FILE, WATCH_LOG_FILE, DYNAMIC_LOG_FILE
         memory = p._load_json(MEMORY_FILE, [])
         perm = p._load_json(PERMANENT_MEMORY_FILE, [])
         profiles = p._load_json(USER_PROFILE_FILE, {})
@@ -117,7 +118,7 @@ class WebPanel:
     async def handle_memory_list(self, request):
         if not self._check_auth(request):
             return self._json_response({'error': '未登录'}, 401)
-        from .main import MEMORY_FILE
+        from .core.config import MEMORY_FILE
         memory = self.plugin._load_json(MEMORY_FILE, [])
         page = int(request.query.get('page', 1))
         per_page = 20
@@ -137,13 +138,13 @@ class WebPanel:
         try:
             data = await request.json()
             rpid = data.get('rpid', '')
-            from .main import MEMORY_FILE
+            from .core.config import MEMORY_FILE
             memory = self.plugin._load_json(MEMORY_FILE, [])
             memory = [m for m in memory if m.get('rpid') != rpid]
             self.plugin._save_json(MEMORY_FILE, memory)
             self.plugin._memory = memory
             return self._json_response({'ok': True})
-        except:
+        except Exception: 
             return self._json_response({'ok': False}, 400)
     
     async def handle_affection_list(self, request):
@@ -156,7 +157,7 @@ class WebPanel:
     async def handle_permanent_list(self, request):
         if not self._check_auth(request):
             return self._json_response({'error': '未登录'}, 401)
-        from .main import PERMANENT_MEMORY_FILE
+        from .core.config import PERMANENT_MEMORY_FILE
         perm = self.plugin._load_json(PERMANENT_MEMORY_FILE, [])
         return self._json_response({'items': perm})
     
@@ -168,12 +169,12 @@ class WebPanel:
             text = data.get('text', '').strip()
             if not text:
                 return self._json_response({'ok': False, 'error': '内容不能为空'}, 400)
-            from .main import PERMANENT_MEMORY_FILE
+            from .core.config import PERMANENT_MEMORY_FILE
             perm = self.plugin._load_json(PERMANENT_MEMORY_FILE, [])
             perm.append({'text': text, 'time': datetime.now().strftime('%Y-%m-%d %H:%M'), 'source': 'web_panel'})
             self.plugin._save_json(PERMANENT_MEMORY_FILE, perm)
             return self._json_response({'ok': True})
-        except:
+        except Exception: 
             return self._json_response({'ok': False}, 400)
     
     async def handle_permanent_delete(self, request):
@@ -182,20 +183,20 @@ class WebPanel:
         try:
             data = await request.json()
             index = data.get('index', -1)
-            from .main import PERMANENT_MEMORY_FILE
+            from .core.config import PERMANENT_MEMORY_FILE
             perm = self.plugin._load_json(PERMANENT_MEMORY_FILE, [])
             if 0 <= index < len(perm):
                 perm.pop(index)
                 self.plugin._save_json(PERMANENT_MEMORY_FILE, perm)
                 return self._json_response({'ok': True})
             return self._json_response({'ok': False, 'error': '索引无效'}, 400)
-        except:
+        except Exception: 
             return self._json_response({'ok': False}, 400)
     
     async def handle_personality(self, request):
         if not self._check_auth(request):
             return self._json_response({'error': '未登录'}, 401)
-        from .main import PERSONALITY_FILE
+        from .core.config import PERSONALITY_FILE
         evo = self.plugin._load_json(PERSONALITY_FILE, {})
         return self._json_response({
             'version': evo.get('version', 0),
@@ -209,14 +210,14 @@ class WebPanel:
     async def handle_dynamic_list(self, request):
         if not self._check_auth(request):
             return self._json_response({'error': '未登录'}, 401)
-        from .main import DYNAMIC_LOG_FILE
+        from .core.config import DYNAMIC_LOG_FILE
         log = self.plugin._load_json(DYNAMIC_LOG_FILE, [])
         return self._json_response({'items': log[-50:]})
     
     async def handle_proactive_log(self, request):
         if not self._check_auth(request):
             return self._json_response({'error': '未登录'}, 401)
-        from .main import WATCH_LOG_FILE, PROACTIVE_LOG_FILE, DYNAMIC_LOG_FILE, PROACTIVE_TRIGGER_LOG_FILE
+        from .core.config import WATCH_LOG_FILE, PROACTIVE_LOG_FILE, DYNAMIC_LOG_FILE, PROACTIVE_TRIGGER_LOG_FILE
         return self._json_response({
             'triggers': self.plugin._load_json(PROACTIVE_TRIGGER_LOG_FILE, [])[-50:],
             'watch': self.plugin._load_json(WATCH_LOG_FILE, [])[-20:],
@@ -227,7 +228,7 @@ class WebPanel:
     async def handle_export(self, request):
         if not self._check_auth(request):
             return self._json_response({'error': '未登录'}, 401)
-        from .main import MEMORY_FILE, PERMANENT_MEMORY_FILE, USER_PROFILE_FILE, AFFECTION_FILE, PERSONALITY_FILE, DYNAMIC_LOG_FILE
+        from .core.config import MEMORY_FILE, PERMANENT_MEMORY_FILE, USER_PROFILE_FILE, AFFECTION_FILE, PERSONALITY_FILE, DYNAMIC_LOG_FILE
         return self._json_response({
             'memory': self.plugin._load_json(MEMORY_FILE, []),
             'permanent': self.plugin._load_json(PERMANENT_MEMORY_FILE, []),
