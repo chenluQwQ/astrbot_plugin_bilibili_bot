@@ -146,17 +146,31 @@ class ProactiveMixin:
 comment要求：像B站用户真实评论，可以玩梗吐槽。
 评分：1-3差，4-5一般，6-7不错，8-9很好，10神作。不要无脑高分。
 直接输出JSON。"""
+        text = None
         try:
             text = await self._llm_call(prompt, system_prompt=sp, max_tokens=350)
             if not text:
                 return None
+            raw = text
             text = text.replace("```json", "").replace("```", "").strip()
             m = re.search(r'\{.*\}', text, re.DOTALL)
-            if m:
-                return json.loads(m.group())
-            return json.loads(text)
+            candidate = m.group() if m else text
+            try:
+                return json.loads(candidate)
+            except Exception:
+                # 容错：去掉尾逗号、尝试 ast.literal_eval
+                fixed = re.sub(r',\s*([}\]])', r'\1', candidate)
+                try:
+                    return json.loads(fixed)
+                except Exception:
+                    try:
+                        import ast
+                        return ast.literal_eval(fixed)
+                    except Exception:
+                        logger.warning(f"[BiliBot] 视频评价 JSON 解析失败，原始返回: {raw[:500]}")
+                        return None
         except Exception as e:
-            logger.error(f"[BiliBot] 视频评价失败: {e}")
+            logger.error(f"[BiliBot] 视频评价失败: {e} | raw={str(text)[:300]}")
             return None
 
     async def _generate_proactive_comment(self, video_info, video_description):
