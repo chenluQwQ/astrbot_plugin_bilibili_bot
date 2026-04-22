@@ -338,15 +338,15 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
                 if score >= 6 and self.config.get("PROACTIVE_LIKE", True):
                     if await self._like_video(oid):
                         actions.append("👍点赞")
-                    logger.info("[BiliBot] 👍 点赞成功")
+                        logger.info("[BiliBot] 👍 点赞成功")
                 if score >= 8 and self.config.get("PROACTIVE_COIN", False):
                     if await self._coin_video(oid):
                         actions.append("🪙投币")
-                    logger.info("[BiliBot] 🪙 投币成功")
+                        logger.info("[BiliBot] 🪙 投币成功")
                 if score >= 8 and self.config.get("PROACTIVE_FAV", True):
                     if await self._fav_video(oid):
                         actions.append("⭐收藏")
-                    logger.info("[BiliBot] ⭐ 收藏成功")
+                        logger.info("[BiliBot] ⭐ 收藏成功")
                 if score >= 7 and comment_count < daily_comment and self.config.get("PROACTIVE_COMMENT", True):
                     proactive_comment = await self._generate_proactive_comment(analysis_info, video_description)
                     if await self._send_comment(oid, proactive_comment):
