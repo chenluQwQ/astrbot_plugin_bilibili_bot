@@ -225,10 +225,56 @@ class BilibiliAPIMixin:
                     "bvid": v.get("bvid", ""), "title": v.get("title", ""), "desc": v.get("desc", ""),
                     "owner_name": v.get("owner", {}).get("name", ""), "owner_mid": v.get("owner", {}).get("mid", ""),
                     "tname": v.get("tname", ""), "duration": v.get("duration", 0), "pic": v.get("pic", ""),
+                    "cid": v.get("cid", 0),
                 }
         except Exception as e:
             logger.error(f"[BiliBot] 获取视频信息失败：{e}")
         return None
+
+    async def _get_video_subtitles(self, bvid, cid):
+        """获取视频字幕文本"""
+        if not bvid or not cid:
+            return ""
+        try:
+            d, _ = await self._http_get(
+                "https://api.bilibili.com/x/player/v2",
+                params={"bvid": bvid, "cid": cid},
+            )
+            if not isinstance(d, dict) or d.get("code") != 0:
+                return ""
+            subtitles = (d.get("data") or {}).get("subtitle", {}).get("subtitles", [])
+            if not subtitles:
+                return ""
+            # 优先中文字幕
+            sub_url = ""
+            for s in subtitles:
+                lan = s.get("lan", "")
+                if "zh" in lan or "cn" in lan:
+                    sub_url = s.get("subtitle_url", "")
+                    break
+            if not sub_url and subtitles:
+                sub_url = subtitles[0].get("subtitle_url", "")
+            if not sub_url:
+                return ""
+            if sub_url.startswith("//"):
+                sub_url = "https:" + sub_url
+            # 获取字幕JSON
+            sub_data, _ = await self._http_get(sub_url)
+            if not isinstance(sub_data, dict):
+                return ""
+            body = sub_data.get("body", [])
+            if not body:
+                return ""
+            # 拼接字幕文本，限制长度
+            lines = [item.get("content", "") for item in body if item.get("content")]
+            full_text = " ".join(lines)
+            if len(full_text) > 2000:
+                full_text = full_text[:2000] + "…（字幕过长已截断）"
+            logger.info(f"[BiliBot] 📝 获取字幕成功: {len(lines)}条 {len(full_text)}字")
+            return full_text
+        except Exception as e:
+            logger.debug(f"[BiliBot] 字幕获取失败: {e}")
+            return ""
 
     async def _get_video_tags(self, bvid):
         try:

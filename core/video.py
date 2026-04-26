@@ -40,17 +40,24 @@ class VideoMixin:
         dur_min = video_info.get("duration", 0) // 60
         dur_sec = video_info.get("duration", 0) % 60
         extra_context = await self._enrich_video_context(video_info)
-        text_prompt = f"""请根据以下B站视频信息，写一段简洁的内容概括（300字以内），包括：这个视频大概在讲什么、是什么类型/风格、可能的受众。
+        # 获取字幕
+        subtitle_text = await self._get_video_subtitles(
+            video_info.get("bvid", ""), video_info.get("cid", 0)
+        )
+        subtitle_section = ""
+        if subtitle_text:
+            subtitle_section = f"\n字幕内容：{subtitle_text[:1500]}"
+        text_prompt = f"""请根据以下B站视频信息，写一段详细的内容概括（500字以内），包括：这个视频的主要内容和讲了什么、关键观点或亮点、视频类型/风格、可能的受众。
 
 视频标题：{video_info.get('title', '未知')}
 UP主：{video_info.get('owner_name', '未知')}
 分区：{video_info.get('tname', '未知')}
 时长：{dur_min}分{dur_sec}秒
-简介：{video_info.get('desc', '无')[:500]}{extra_context}
+简介：{video_info.get('desc', '无')[:500]}{extra_context}{subtitle_section}
 
 直接输出概括内容，不要加前缀。"""
         provider_id = self.config.get("VIDEO_VISION_PROVIDER_ID", "")
-        provider_result = await self._astrbot_multimodal_generate(provider_id, [{"type": "text", "text": text_prompt}], max_tokens=250)
+        provider_result = await self._astrbot_multimodal_generate(provider_id, [{"type": "text", "text": text_prompt}], max_tokens=500)
         if provider_result:
             return provider_result
         if client and model and video_info.get("pic"):
@@ -58,25 +65,31 @@ UP主：{video_info.get('owner_name', '未知')}
                 b64 = await self._fetch_image_base64(video_info["pic"])
                 if b64:
                     content = [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}, {"type": "text", "text": text_prompt}]
-                    result = await self._vision_call(client, model, content, max_tokens=250)
+                    result = await self._vision_call(client, model, content, max_tokens=500)
                     if result:
                         return result
             except Exception as e:
                 logger.warning(f"[BiliBot] 视觉分析封面失败: {e}")
-        result = await self._llm_call(text_prompt, max_tokens=250)
+        result = await self._llm_call(text_prompt, max_tokens=500)
         return result or f"视频《{video_info.get('title', '未知')}》，UP主：{video_info.get('owner_name', '未知')}，分区：{video_info.get('tname', '未知')}。简介：{video_info.get('desc', '无')[:100]}"
 
     async def _analyze_video_text(self, video_info):
         extra_context = await self._enrich_video_context(video_info)
-        prompt = f"""请根据以下B站视频信息，写一段简洁的内容概括（300字以内），包括：这个视频大概在讲什么、是什么类型/风格、可能的受众。
+        subtitle_text = await self._get_video_subtitles(
+            video_info.get("bvid", ""), video_info.get("cid", 0)
+        )
+        subtitle_section = ""
+        if subtitle_text:
+            subtitle_section = f"\n字幕内容：{subtitle_text[:1500]}"
+        prompt = f"""请根据以下B站视频信息，写一段详细的内容概括（500字以内），包括：这个视频的主要内容和讲了什么、关键观点或亮点、视频类型/风格、可能的受众。
 
 视频标题：{video_info.get('title', '未知')}
 UP主：{video_info.get('up_name', '未知')}
 分区：{video_info.get('tname', '未知')}
-简介：{video_info.get('desc', '无')[:500]}{extra_context}
+简介：{video_info.get('desc', '无')[:500]}{extra_context}{subtitle_section}
 
 直接输出概括内容，不要加前缀。"""
-        result = await self._llm_call(prompt, max_tokens=250)
+        result = await self._llm_call(prompt, max_tokens=500)
         return result or f"视频《{video_info.get('title', '未知')}》，UP主：{video_info.get('up_name', '未知')}"
 
     async def _analyze_video_media(self, video_info):

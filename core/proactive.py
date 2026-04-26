@@ -336,6 +336,7 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
                     "desc": vi.get("desc", video.get("desc", "")), "up_name": vi.get("owner_name", video.get("up_name", "")),
                     "up_mid": vi.get("owner_mid", video.get("up_mid", "")), "tname": vi.get("tname", video.get("tname", "")),
                     "duration": vi.get("duration", 0), "pic": vi.get("pic", video.get("pic", "")),
+                    "cid": vi.get("cid", 0),
                 } if vi else {"bvid": bvid}),
             }
             video_description = await self._analyze_video_with_vision(analysis_info)

@@ -234,7 +234,7 @@ def create_tools(plugin):
                     "desc": vi.get("desc", ""), "up_name": vi.get("owner_name", ""),
                     "up_mid": vi.get("owner_mid", ""), "tname": vi.get("tname", ""),
                     "duration": vi.get("duration", 0), "pic": vi.get("pic", ""),
-                    "oid": oid,
+                    "cid": vi.get("cid", 0), "oid": oid,
                 }
                 video_description = await plugin._analyze_video_with_vision(analysis_info)
                 evaluation = await plugin._evaluate_video(analysis_info, video_description)
