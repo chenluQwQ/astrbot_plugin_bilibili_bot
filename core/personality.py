@@ -31,6 +31,8 @@ class PersonalityMixin:
     @staticmethod
     def _parse_evolve_json(raw_text, old_habits, old_opinions):
         text = raw_text.replace("```json", "").replace("```", "").strip()
+        # 修复LLM返回的中文引号导致JSON解析失败
+        text = text.replace('\u201c', "'").replace('\u201d', "'").replace('\u2018', "'").replace('\u2019', "'")
         try:
             return json.loads(text)
         except Exception:

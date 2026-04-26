@@ -146,13 +146,17 @@ class ProactiveMixin:
 comment要求：像B站用户真实评论，可以玩梗吐槽。
 评分：1-3差，4-5一般，6-7不错，8-9很好，10神作。不要无脑高分。
 直接输出JSON。"""
+        custom_proactive_inst = self.config.get("CUSTOM_PROACTIVE_INSTRUCTION", "")
+        if custom_proactive_inst:
+            prompt += f"\n\n【额外指令】{custom_proactive_inst}"
         text = None
         try:
             text = await self._llm_call(prompt, system_prompt=sp, max_tokens=350)
             if not text:
                 return None
             raw = text
-            text = text.replace("```json", "").replace("```", "").strip()
+            text = self._repair_llm_json(text)
+            # 修复LLM返回的中文引号导致JSON解析失败
             m = re.search(r'\{.*\}', text, re.DOTALL)
             candidate = m.group() if m else text
             try:
@@ -188,6 +192,9 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
 2. 体现你的性格
 3. 不超过40字
 4. 直接输出评论内容，不加任何前缀"""
+        custom_proactive_inst = self.config.get("CUSTOM_PROACTIVE_INSTRUCTION", "")
+        if custom_proactive_inst:
+            prompt += f"\n\n【额外指令】{custom_proactive_inst}"
         result = await self._llm_call(prompt, system_prompt=sp, max_tokens=100)
         return result or "这个视频还不错"
 

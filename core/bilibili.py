@@ -373,3 +373,250 @@ class BilibiliAPIMixin:
         except Exception as e:
             logger.error(f"[BiliBot] 获取UP主最新视频失败: {e}")
             return None
+
+    # ── B站搜索 & UP主查询 API ──
+
+    async def search_bilibili_videos(self, keyword, ps=5):
+        """搜索B站视频，返回视频列表"""
+        try:
+            params = await self.sign_wbi_params({
+                "keyword": keyword, "search_type": "video",
+                "page": 1, "page_size": ps, "order": "totalrank",
+            })
+            d, _ = await self._http_get(
+                "https://api.bilibili.com/x/web-interface/wbi/search/type", params=params,
+            )
+            if d.get("code") != 0:
+                logger.debug(f"[BiliBot] 搜索视频失败: code={d.get('code')} msg={d.get('message')}")
+                return []
+            results = []
+            for v in (d.get("data") or {}).get("result", [])[:ps]:
+                title = re.sub(r"<[^>]+>", "", v.get("title", ""))
+                results.append({
+                    "bvid": v.get("bvid", ""),
+                    "title": title,
+                    "author": v.get("author", ""),
+                    "mid": v.get("mid", ""),
+                    "play": v.get("play", 0),
+                    "danmaku": v.get("video_review", 0),
+                    "desc": v.get("description", "")[:100],
+                    "duration": v.get("duration", ""),
+                    "pubdate": v.get("pubdate", 0),
+                })
+            return results
+        except Exception as e:
+            logger.error(f"[BiliBot] 搜索视频异常: {e}")
+            return []
+
+    async def search_bilibili_users(self, keyword, ps=3):
+        """搜索B站用户/UP主"""
+        try:
+            params = await self.sign_wbi_params({
+                "keyword": keyword, "search_type": "bili_user",
+                "page": 1, "page_size": ps,
+            })
+            d, _ = await self._http_get(
+                "https://api.bilibili.com/x/web-interface/wbi/search/type", params=params,
+            )
+            if d.get("code") != 0:
+                return []
+            results = []
+            for u in (d.get("data") or {}).get("result", [])[:ps]:
+                results.append({
+                    "mid": u.get("mid", ""),
+                    "uname": u.get("uname", ""),
+                    "fans": u.get("fans", 0),
+                    "videos": u.get("videos", 0),
+                    "sign": u.get("usign", "")[:80],
+                    "level": u.get("level", 0),
+                })
+            return results
+        except Exception as e:
+            logger.error(f"[BiliBot] 搜索用户异常: {e}")
+            return []
+
+    async def get_up_info(self, mid):
+        """获取UP主详细信息"""
+        try:
+            params = await self.sign_wbi_params({"mid": mid})
+            d, _ = await self._http_get(
+                "https://api.bilibili.com/x/space/wbi/acc/info", params=params,
+            )
+            if d.get("code") != 0:
+                return None
+            data = d.get("data") or {}
+            return {
+                "mid": data.get("mid"),
+                "name": data.get("name", ""),
+                "sign": data.get("sign", ""),
+                "level": data.get("level", 0),
+                "fans_badge": data.get("fans_badge", False),
+                "official_title": (data.get("official") or {}).get("title", ""),
+                "vip_label": (data.get("vip") or {}).get("label", {}).get("text", ""),
+            }
+        except Exception as e:
+            logger.error(f"[BiliBot] 获取UP主信息失败: {e}")
+            return None
+
+    async def get_up_recent_videos(self, mid, ps=5):
+        """获取UP主最近的N个视频"""
+        try:
+            params = await self.sign_wbi_params({
+                "mid": mid, "ps": ps, "pn": 1, "order": "pubdate",
+            })
+            d, _ = await self._http_get(
+                "https://api.bilibili.com/x/space/wbi/arc/search", params=params,
+            )
+            if d.get("code") != 0:
+                return []
+            vlist = (d.get("data") or {}).get("list", {}).get("vlist", [])
+            results = []
+            for v in vlist[:ps]:
+                results.append({
+                    "bvid": v.get("bvid", ""),
+                    "title": v.get("title", ""),
+                    "desc": v.get("description", "")[:80],
+                    "play": v.get("play", 0),
+                    "created": v.get("created", 0),
+                })
+            return results
+        except Exception as e:
+            logger.error(f"[BiliBot] 获取UP主视频列表失败: {e}")
+            return []
+
+    async def get_up_recent_dynamics(self, mid, limit=5):
+        """获取UP主最近的动态"""
+        try:
+            d, _ = await self._http_get(
+                "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space",
+                params={
+                    "host_mid": mid, "offset": "",
+                    "timezone_offset": -480,
+                    "features": "itemOpusStyle,listOnlyfans,opusBigCover,onlyfansVote",
+                },
+            )
+            if d.get("code") != 0:
+                return []
+            results = []
+            for item in ((d.get("data") or {}).get("items") or [])[:limit]:
+                modules = item.get("modules") or {}
+                author = modules.get("module_author") or {}
+                dynamic = modules.get("module_dynamic") or {}
+                desc = (dynamic.get("desc") or {}).get("text", "")
+                # opus格式
+                major = dynamic.get("major") or {}
+                if not desc and major.get("type") == "MAJOR_TYPE_OPUS":
+                    opus = major.get("opus") or {}
+                    desc = (opus.get("summary") or {}).get("text", "") or opus.get("title", "")
+                results.append({
+                    "dynamic_id": item.get("id_str", ""),
+                    "type": item.get("type", ""),
+                    "text": desc[:120] if desc else "",
+                    "pub_time": author.get("pub_time", ""),
+                })
+            return results
+        except Exception as e:
+            logger.error(f"[BiliBot] 获取UP主动态失败: {e}")
+            return []
+
+    async def get_following_updates(self, limit=20):
+        """获取关注列表的最新动态流（今日更新）"""
+        try:
+            d, _ = await self._http_get(
+                "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/all",
+                params={
+                    "timezone_offset": -480, "type": "all", "offset": "",
+                    "features": "itemOpusStyle,listOnlyfans,opusBigCover,onlyfansVote",
+                },
+            )
+            if d.get("code") != 0:
+                logger.debug(f"[BiliBot] 关注动态流获取失败: code={d.get('code')}")
+                return []
+            results = []
+            from datetime import datetime
+            today = datetime.now().strftime("%Y-%m-%d")
+            for item in ((d.get("data") or {}).get("items") or [])[:limit]:
+                modules = item.get("modules") or {}
+                author = modules.get("module_author") or {}
+                dynamic = modules.get("module_dynamic") or {}
+                # 时间戳
+                pub_ts = author.get("pub_ts", 0)
+                if pub_ts:
+                    pub_date = datetime.fromtimestamp(pub_ts).strftime("%Y-%m-%d")
+                    if pub_date != today:
+                        continue  # 只要今天的
+                pub_time = author.get("pub_time", "")
+                up_name = author.get("name", "")
+                up_mid = str(author.get("mid", ""))
+                # 动态文字
+                desc = (dynamic.get("desc") or {}).get("text", "")
+                major = dynamic.get("major") or {}
+                major_type = major.get("type", "")
+                if not desc and (major_type == "MAJOR_TYPE_OPUS" or "opus" in major):
+                    opus = major.get("opus") or {}
+                    desc = (opus.get("summary") or {}).get("text", "") or opus.get("title", "")
+                # 视频投稿
+                video_title = ""
+                video_bvid = ""
+                if major_type == "MAJOR_TYPE_ARCHIVE":
+                    archive = major.get("archive") or {}
+                    video_title = archive.get("title", "")
+                    video_bvid = archive.get("bvid", "")
+                # 直播动态
+                live_title = ""
+                if major_type in ("MAJOR_TYPE_LIVE", "MAJOR_TYPE_LIVE_RCMD"):
+                    live = major.get("live") or major.get("live_rcmd") or {}
+                    # live_rcmd 的内容可能嵌套在 content 里（JSON字符串）
+                    if "content" in live:
+                        try:
+                            import json
+                            live_content = json.loads(live["content"]) if isinstance(live["content"], str) else live["content"]
+                            live_title = live_content.get("title", "") or live_content.get("live_play_info", {}).get("title", "")
+                        except Exception:
+                            live_title = ""
+                    else:
+                        live_title = live.get("title", "")
+                dyn_type = item.get("type", "")
+                # 未识别的类型打日志
+                if not desc and not video_title and not live_title:
+                    logger.debug(f"[BiliBot] 关注动态无内容: up={up_name} type={dyn_type} major_type={major_type} keys={list(major.keys())}")
+                results.append({
+                    "up_name": up_name,
+                    "up_mid": up_mid,
+                    "type": dyn_type,
+                    "text": desc[:120] if desc else "",
+                    "video_title": video_title,
+                    "video_bvid": video_bvid,
+                    "live_title": live_title,
+                    "pub_time": pub_time,
+                })
+            return results
+        except Exception as e:
+            logger.error(f"[BiliBot] 获取关注动态流失败: {e}")
+            return []
+
+    async def get_following_live(self):
+        """查看关注的人谁在直播"""
+        try:
+            d, _ = await self._http_get(
+                "https://api.live.bilibili.com/xlive/web-ucenter/v1/xfetter/FeedList",
+                params={"page": 1, "pagesize": 20},
+            )
+            if not isinstance(d, dict) or d.get("code") != 0:
+                logger.debug(f"[BiliBot] 直播列表获取失败: {d.get('code') if isinstance(d, dict) else type(d)}")
+                return []
+            results = []
+            for item in ((d.get("data") or {}).get("list") or []):
+                results.append({
+                    "uname": item.get("uname", ""),
+                    "mid": str(item.get("uid", "")),
+                    "title": item.get("title", ""),
+                    "room_id": item.get("roomid", ""),
+                    "area_name": item.get("area_v2_name", "") or item.get("area_name", ""),
+                    "online": item.get("online", 0),
+                    "link": f"https://live.bilibili.com/{item.get('roomid', '')}",
+                })
+            return results
+        except Exception as e:
+            logger.error(f"[BiliBot] 获取关注直播列表失败: {e}")
+            return []

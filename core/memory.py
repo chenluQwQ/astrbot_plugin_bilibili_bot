@@ -108,6 +108,18 @@ class MemoryMixin:
         docs.sort(key=lambda x: x.get("time", ""))
         return [m["text"] for m in docs]
 
+    def _get_bvid_memories(self, bvid, exclude_oid=None):
+        """按bvid调取所有与该视频相关的历史记忆（主动看视频、以前的评论区互动等）。
+        排除当前oid避免和评论区记忆重复。"""
+        exclude_oid_str = str(exclude_oid) if exclude_oid else ""
+        docs = [
+            m for m in self._memory
+            if (m.get("bvid") == bvid or m.get("thread_id") == f"video:{bvid}")
+            and (not exclude_oid_str or m.get("oid", "") != exclude_oid_str)
+        ]
+        docs.sort(key=lambda x: x.get("time", ""))
+        return [self._format_memory_with_meta(m) for m in docs]
+
     async def _get_user_semantic_memories(self, user_id, query_text, memory_types=None):
         um = [
             m for m in self._memory
@@ -192,6 +204,15 @@ class MemoryMixin:
                 "source": "bilibili",
                 "memory_type": "user_summary",
             }
+            # 保留视频元数据（从被压缩的记录中提取）
+            for m in old:
+                if m.get("bvid"):
+                    comp["bvid"] = m["bvid"]
+                    break
+            for m in old:
+                if m.get("video_title"):
+                    comp["video_title"] = m["video_title"]
+                    break
             if emb:
                 comp["embedding"] = emb
             old_rpids = {m["rpid"] for m in old}
@@ -229,6 +250,15 @@ class MemoryMixin:
             }
             if old_oid:
                 comp["oid"] = str(old_oid)
+            # 保留视频元数据
+            for m in old:
+                if m.get("bvid"):
+                    comp["bvid"] = m["bvid"]
+                    break
+            for m in old:
+                if m.get("video_title"):
+                    comp["video_title"] = m["video_title"]
+                    break
             if emb:
                 comp["embedding"] = emb
             old_rpids = {m["rpid"] for m in old}
@@ -255,12 +285,11 @@ class MemoryMixin:
             text = await self._llm_call(prompt, max_tokens=400)
             if not text:
                 return
-            text = text.replace("```json", "").replace("```", "").strip()
+            text = self._repair_llm_json(text)
             try:
                 result = json.loads(text)
             except Exception:
-                m = re.search(r'\{.*\}', text, re.DOTALL)
-                result = json.loads(m.group()) if m else {"summary": text[:100], "tags": [], "user_facts": []}
+                result = {"summary": text[:100], "tags": [], "user_facts": []}
             self._update_user_profile(user_id, impression=result.get("summary") or None, new_facts=result.get("user_facts") or None, new_tags=result.get("tags") or None)
             now = datetime.now().strftime("%Y-%m-%d %H:%M")
             emb = await self._get_embedding(result.get("summary", ""))
@@ -270,6 +299,19 @@ class MemoryMixin:
                 "time": now, "text": f"[记忆压缩] {result.get('summary', '')}",
                 "source": "bilibili", "memory_type": "user_summary",
             }
+            # 保留元数据（用户可能在多个视频下互动，取最近的）
+            for m in reversed(old):
+                if m.get("oid"):
+                    comp["oid"] = str(m["oid"])
+                    break
+            for m in reversed(old):
+                if m.get("bvid"):
+                    comp["bvid"] = m["bvid"]
+                    break
+            for m in reversed(old):
+                if m.get("video_title"):
+                    comp["video_title"] = m["video_title"]
+                    break
             if emb:
                 comp["embedding"] = emb
             old_rpids = {m["rpid"] for m in old}
@@ -300,19 +342,26 @@ class MemoryMixin:
             parts.append("【Bot的自我认知】\n" + "\n".join([f"[{p.get('time', '?')}] {p['text']}" for p in perm[-20:]]))
 
         # 1.2 视频/动态内容
+        bvid = ""
         if comment_type == 1 and oid:
             vc, cache_entry = await self._get_video_context(oid, comment_type)
             if vc:
                 parts.append(vc)
-            # UP主画像（知道这个UP主是谁）
             if cache_entry:
+                bvid = cache_entry.get("bvid", "")
+                # UP主画像（知道这个UP主是谁）
                 up_mid = str(cache_entry.get("owner_mid", ""))
                 if up_mid and up_mid != bot_mid:
                     up_profile = self._get_user_profile_context(up_mid)
                     if up_profile:
                         parts.append(up_profile.replace("【对该用户的了解】", "【该视频UP主的了解】"))
+            # 1.2.1 调取与该视频相关的历史记忆（按bvid匹配，排除当前oid避免重复）
+            if bvid:
+                bvid_mems = self._get_bvid_memories(bvid, exclude_oid=oid)
+                if bvid_mems:
+                    parts.append("【以前关于这个视频的记忆】\n" + "\n".join(bvid_mems[-10:]))
         elif comment_type in (11, 17) and oid:
-            dc = await self._get_dynamic_context(oid)
+            dc = await self._get_dynamic_context(oid, comment_type=comment_type)
             if dc:
                 parts.append(dc)
 

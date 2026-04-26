@@ -51,10 +51,13 @@ class ReplyMixin:
                 f'请以JSON格式回复：\n{{"score_delta": 数字, "reply": "回复内容", "impression": "印象", "user_facts": ["个人信息"], "permanent_memory": "永久记忆(没有则留空)"}}\n\n'
                 f"score_delta：友善+2，普通+1，不友善-2，辱骂-5。reply不超过50字。"
             )
+            custom_reply_inst = self.config.get("CUSTOM_REPLY_INSTRUCTION", "")
+            if custom_reply_inst:
+                prompt += f"\n\n【额外指令】{custom_reply_inst}"
             rt = await self._llm_call(prompt, system_prompt=sp)
             if not rt:
                 return None
-            rt = rt.replace("```json", "").replace("```", "").strip()
+            rt = self._repair_llm_json(rt)
             r = None
             try:
                 r = json.loads(rt)
@@ -253,6 +256,7 @@ class ReplyMixin:
 
             cs = self._affection.get(str(mid), 0)
             lv = self._get_level(cs, mid)
+            logger.info(f"[BiliBot] 🔍 DEBUG comment_type={comment_type} oid={oid}")
             logger.info(f"[BiliBot] 📩 {username}（{LEVEL_NAMES[lv]}|{cs}分）：{content[:50]}")
 
             image_desc = ""

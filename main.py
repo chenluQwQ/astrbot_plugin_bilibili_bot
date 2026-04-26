@@ -26,6 +26,14 @@ if os.path.isdir(_astrbot_site_packages) and _astrbot_site_packages not in sys.p
 @register("astrbot_plugin_bilibili_ai_bot","chenluQwQ","B站 AI Bot — 自动回复评论、好感度、记忆、心情、用户画像、主动视频、性格演化、动态发布","1.2.0","https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot")
 class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, AffectionMixin, PersonalityMixin, BilibiliAPIMixin, WebSearchMixin, VideoMixin, ReplyMixin, ProactiveMixin, DynamicMixin, ScheduleMixin):
     def __init__(self, context: Context, config: AstrBotConfig):
+        # 清理旧缓存，确保插件更新后代码生效
+        import shutil as _shutil
+        _plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        for _root, _dirs, _ in os.walk(_plugin_dir):
+            for _d in _dirs:
+                if _d == "__pycache__":
+                    _shutil.rmtree(os.path.join(_root, _d), ignore_errors=True)
+
         super().__init__(context)
         self.config = config
         self._ensure_data_dir()
@@ -57,6 +65,10 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             asyncio.create_task(self._auto_start())
         if self.config.get("ENABLE_WEB_PANEL", False):
             asyncio.create_task(self._start_web_panel())
+
+        # 注册 FunctionTool 工具（结果回到 LLM 重新生成）
+        from .core.tools import create_tools
+        self.context.add_llm_tools(*create_tools(self))
 
     async def _start_web_panel(self):
         try:
@@ -319,13 +331,6 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         })
         self._save_json(PROACTIVE_TRIGGER_LOG_FILE, trigger_log[-200:])
         return "已在后台触发一次主动看B站视频流程。稍后可用 /bili日志 查看结果。"
-    @filter.llm_tool(name="bili_watch_videos")
-    async def tool_bili_watch_videos(self, event: AstrMessageEvent, **kwargs):
-        """触发一次主动看B站视频流程。
-
-        当用户明确要求你去看看/刷刷/随机看一些B站视频时使用。
-        """
-        yield event.plain_result(await self._tool_bili_watch_videos_result())
     @filter.command("bili开关")
     async def cmd_toggle(self, event: AstrMessageEvent):
         parts = event.message_str.strip().split(maxsplit=1)
@@ -426,22 +431,6 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         if not results:
             return f"没有找到与「{query}」相关的记忆。"
         return "\n".join([f"{i}. {r}" for i, r in enumerate(results, 1)])
-    @filter.llm_tool(name="bili_search_memory")
-    async def tool_bili_search_memory(self, event: AstrMessageEvent, query: str, memory_type: str = "", source: str = "", **kwargs):
-        """搜索插件记忆，在回答和B站经历、视频、动态、跨平台互动相关的问题时使用。
-
-        Args:
-            query(string): 要搜索的关键词或问题
-            memory_type(string): 记忆类型，可选 chat/video/dynamic/user_summary 或 交流/视频/动态/总结
-            source(string): 记忆来源，可选 bilibili/qq/all
-        """
-        yield event.plain_result(
-            await self._tool_bili_search_memory_result(
-                query=query,
-                memory_type=memory_type,
-                source=source,
-            )
-        )
     @filter.command("bili好感")
     async def cmd_affection(self, event: AstrMessageEvent):
         parts = event.message_str.strip().split(maxsplit=1)
@@ -759,29 +748,37 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
 
     @filter.on_llm_request()
     async def inject_bili_memory(self, event: AstrMessageEvent, req: ProviderRequest):
-        """QQ对话提到B站相关关键词时，注入B站侧的永久记忆"""
+        """QQ对话自动注入B站侧记忆：永久记忆 + 语义检索相关记忆"""
         try:
             await self._maybe_trigger_proactive_from_llm(event, req)
             msg = event.message_str or ""
-            if not any(kw in msg.lower() for kw in BILI_MENTION_KEYWORDS):
+            if not msg or msg.startswith("/"):
                 return
             qq_id = str(event.get_sender_id())
             bindings = self._load_json(BINDING_FILE, {})
             if qq_id not in bindings:
                 return
             bili_uid = bindings[qq_id]
+
+            sections = []
+
+            # 永久记忆（始终注入，这是Bot的自我认知）
             perm = self._load_json(PERMANENT_MEMORY_FILE, [])
             perm_texts = [f"[{p.get('time','?')}] {p['text']}" for p in perm[-10:] if p.get("text")]
-            semantic_texts = await self._get_user_semantic_memories(bili_uid, msg)
-            if not perm_texts and not semantic_texts:
-                return
-            sections = []
             if perm_texts:
                 sections.append("【B站侧长期记忆】\n" + "\n".join(perm_texts))
-            if semantic_texts:
-                sections.append("【与该用户相关的B站/跨平台记忆】\n" + "\n".join(semantic_texts[:5]))
-            req.system_prompt += f"\n\n【该用户已绑定B站UID:{bili_uid}】\n" + "\n\n".join(sections)
-            logger.debug(f"[BiliBot] QQ→B站记忆注入：perm={len(perm_texts)} semantic={len(semantic_texts)}")
+
+            # 自动语义预检索（用当前消息搜记忆，阈值0.65避免噪声）
+            semantic_results = await self._search_memories(
+                msg, limit=3, source=None, memory_types=None,
+                user_id=None, score_threshold=0.65,
+            )
+            if semantic_results:
+                sections.append("【自动调取的相关记忆】\n" + "\n".join(semantic_results[:3]))
+
+            if sections:
+                req.system_prompt += f"\n\n【该用户已绑定B站UID:{bili_uid}】\n" + "\n\n".join(sections)
+                logger.debug(f"[BiliBot] QQ→B站记忆注入：perm={len(perm_texts)} semantic={len(semantic_results)}")
         except Exception as e:
             logger.error(f"[BiliBot] 记忆注入失败: {e}")
 

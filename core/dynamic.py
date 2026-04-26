@@ -114,11 +114,14 @@ class DynamicMixin:
 {{"text": "动态文案（50-150字，自然随意）", "need_image": true或false, "image_prompt": "如果need_image为true，写一段英文图片描述用于AI生图，否则留空"}}
 
 注意：动态文案要有个性，不要像AI写的。不是每次都需要图片。"""
+        custom_dynamic_inst = self.config.get("CUSTOM_DYNAMIC_INSTRUCTION", "")
+        if custom_dynamic_inst:
+            prompt += f"\n\n【额外指令】{custom_dynamic_inst}"
         try:
             text = await self._llm_call(prompt, max_tokens=500)
             if not text:
                 return None
-            text = text.replace("```json", "").replace("```", "").strip()
+            text = self._repair_llm_json(text)
             try:
                 return json.loads(text)
             except json.JSONDecodeError:

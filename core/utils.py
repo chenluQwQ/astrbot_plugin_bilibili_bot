@@ -222,3 +222,21 @@ class UtilsMixin:
                 pass
         if cleaned:
             logger.info(f"[BiliBot] 🗑️ 清理了 {cleaned} 个临时文件")
+
+    @staticmethod
+    def _repair_llm_json(text):
+        """修复LLM返回的各种JSON格式问题"""
+        import re
+        # 去 markdown 包裹
+        text = text.replace("```json", "").replace("```", "").strip()
+        # 中文引号 → 安全字符
+        text = text.replace('\u201c', "'").replace('\u201d', "'")
+        text = text.replace('\u2018', "'").replace('\u2019', "'")
+        text = text.replace('\uff02', "'")  # 全角双引号
+        # 去掉尾逗号
+        text = re.sub(r',\s*([}\]])', r'\1', text)
+        # 提取JSON对象
+        m = re.search(r'\{.*\}', text, re.DOTALL)
+        if m:
+            text = m.group()
+        return text
