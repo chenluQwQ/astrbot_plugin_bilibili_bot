@@ -148,7 +148,7 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
 直接输出JSON。"""
         custom_proactive_inst = self.config.get("CUSTOM_PROACTIVE_INSTRUCTION", "")
         if custom_proactive_inst:
-            prompt += f"\n\n【额外指令】{custom_proactive_inst}"
+            prompt += f"\n\n【补充提示词】{custom_proactive_inst}"
         text = None
         try:
             text = await self._llm_call(prompt, system_prompt=sp, max_tokens=350)
@@ -194,7 +194,7 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
 4. 直接输出评论内容，不加任何前缀"""
         custom_proactive_inst = self.config.get("CUSTOM_PROACTIVE_INSTRUCTION", "")
         if custom_proactive_inst:
-            prompt += f"\n\n【额外指令】{custom_proactive_inst}"
+            prompt += f"\n\n【补充提示词】{custom_proactive_inst}"
         result = await self._llm_call(prompt, system_prompt=sp, max_tokens=100)
         return result or "这个视频还不错"
 
@@ -391,6 +391,9 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
 - 不超过25字
 - 不要带@、不要带任何人名或称呼
 - 直接输出推荐语"""
+                            custom_rec_inst = self.config.get("CUSTOM_RECOMMEND_INSTRUCTION", "")
+                            if custom_rec_inst:
+                                rec_prompt += f"\n【补充提示词】{custom_rec_inst}"
                             rec_text = await self._llm_call(rec_prompt, system_prompt=self._get_system_prompt(), max_tokens=60)
                             rec_text = re.sub(r'@\S+\s*', '', rec_text or "你可能会喜欢这个")
                             owner_name = (self.config.get("OWNER_NAME", "") or "").strip()

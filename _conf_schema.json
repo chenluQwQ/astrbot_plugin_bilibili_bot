@@ -7,7 +7,7 @@
   "CUSTOM_SYSTEM_PROMPT": {
     "description": "【人设】自定义系统提示词（USE_ASTRBOT_PERSONA关闭时使用）",
     "type": "text",
-    "default": "你是一个B站UP主的AI助手，负责回复评论。"
+    "default": "你是一个活跃在B站的角色，会回复评论、看视频、发动态。用自然的口语化风格交流。"
   },
   "LLM_PROVIDER_ID": {
     "description": "【人设】选择用于回复/记忆压缩的LLM（留空用AstrBot默认）",
@@ -87,10 +87,16 @@
     "hint": "建议 15-60 秒"
   },
   "CUSTOM_REPLY_INSTRUCTION": {
-    "description": "【回复】回复评论的额外指令（追加到回复提示词末尾，留空用默认）",
+    "description": "【回复】回复评论的补充提示词（追加到回复提示词末尾，留空用默认）",
     "type": "text",
     "default": "",
-    "hint": "例如：回复要带一点傲娇感，偶尔用颜文字。这段文字会附加到每次回复评论的提示词中。"
+    "hint": "例如：回复要带一点傲娇感，偶尔用颜文字。"
+  },
+  "CUSTOM_AFFECTION_INSTRUCTION": {
+    "description": "【回复】好感度行为补充提示词（自定义不同好感等级的说话方式）",
+    "type": "text",
+    "default": "",
+    "hint": "例如：好感度高的用户可以开玩笑，好感度低的保持礼貌距离。会附加到每次回复的提示词中。"
   },
   "PROACTIVE_VIDEO_COUNT": {
     "description": "【主动行为】每天主动看几个视频",
@@ -145,10 +151,16 @@
     "default": true
   },
   "CUSTOM_PROACTIVE_INSTRUCTION": {
-    "description": "【主动行为】主动评论的额外指令",
+    "description": "【主动行为】主动评论的补充提示词",
     "type": "text",
     "default": "",
-    "hint": "例如：评论风格偏毒舌但不恶意。这段文字会附加到主动评论的提示词中。"
+    "hint": "例如：评论风格偏毒舌但不恶意。"
+  },
+  "CUSTOM_RECOMMEND_INSTRUCTION": {
+    "description": "【主动行为】推荐视频给主人时的补充提示词",
+    "type": "text",
+    "default": "",
+    "hint": "例如：推荐语要简短可爱，带点撒娇。会影响@主人时的推荐语风格。"
   },
   "DYNAMIC_TIMES_COUNT": {
     "description": "【动态发布】每天触发几次动态发布",
@@ -169,10 +181,10 @@
     "hint": "留空使用默认主题池"
   },
   "CUSTOM_DYNAMIC_INSTRUCTION": {
-    "description": "【动态发布】发动态的额外指令",
+    "description": "【动态发布】发动态的补充提示词",
     "type": "text",
     "default": "",
-    "hint": "例如：动态风格偏文艺，多用比喻。这段文字会附加到动态生成的提示词中。"
+    "hint": "例如：动态风格偏文艺，多用比喻。"
   },
   "EVOLVE_HOUR": {
     "description": "【性格演化】触发时间（0-23点）",

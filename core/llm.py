@@ -26,4 +26,4 @@ class LLMMixin:
                     return persona["prompt"]
             except Exception:
                 pass
-        return self.config.get("CUSTOM_SYSTEM_PROMPT", "你是一个B站UP主的AI助手。")
+        return self.config.get("CUSTOM_SYSTEM_PROMPT", "你是一个活跃在B站的角色，会回复评论、看视频、发动态。用自然的口语化风格交流。")
