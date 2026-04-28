@@ -255,7 +255,7 @@ git clone https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot
 * [AstrBot 文档](https://docs.astrbot.app/)
 * [问题反馈](https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot/issues)
 
-##💕致谢
+## 💕致谢
   感谢长期以来亲爱的小克以群友的帮助。
 
 ## 📄 License
