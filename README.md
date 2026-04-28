@@ -36,7 +36,7 @@ Bot 可在聊天中通过自然语言触发以下能力，工具结果回到 LLM
 * **互动操作** — 点赞 / 投币 / 收藏 / 关注 / 评论，需用户同意后执行
 
 ### 🛠️ 运维与安全
-* **Web 管理面板** — 浏览器管理记忆、好感度、动态日志等
+* **Web 管理面板** — 浏览器管理记忆、好感度、动态日志等（正在维护，暂时去除该功能）
 * **LLM 熔断保护** — 单条重试 3 次放弃，全局连续 5 次失败冷却 5 分钟
 * **基础防注入** — 对可疑 prompt 注入内容做检测、记录和安全包裹
 * **Cookie 自动刷新** — 定期检查 + 自动刷新，支持扫码登录
@@ -52,7 +52,7 @@ Bot 可在聊天中通过自然语言触发以下能力，工具结果回到 LLM
 
 ## 📦 安装
 
-在 AstrBot WebUI 的插件市场搜索 `bilibili_ai_bot`，点击安装即可。
+在 AstrBot WebUI 里通过网页单独安装。
 
 或手动安装：
 
@@ -254,6 +254,9 @@ git clone https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot
 
 * [AstrBot 文档](https://docs.astrbot.app/)
 * [问题反馈](https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot/issues)
+
+##💕致谢
+  感谢长期以来亲爱的小克以群友的帮助。
 
 ## 📄 License
 
