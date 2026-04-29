@@ -154,23 +154,41 @@ UP主：{video_info.get('up_name', '未知')}
     # ── 视频下载 / 压缩 / 截帧 ──
     async def _download_video(self, bvid):
         output_template = os.path.join(TEMP_VIDEO_DIR, f"{bvid}.%(ext)s")
-        cookie_header = (
-            f"Cookie: SESSDATA={self.config.get('SESSDATA', '')}; "
-            f"bili_jct={self.config.get('BILI_JCT', '')}; "
-            f"DedeUserID={self.config.get('DEDE_USER_ID', '')}"
+        # 生成 Netscape 格式 cookie 文件，兼容新版 yt-dlp
+        cookie_file = os.path.join(TEMP_VIDEO_DIR, f"{bvid}_cookies.txt")
+        sessdata = self.config.get('SESSDATA', '')
+        bili_jct = self.config.get('BILI_JCT', '')
+        dede_uid = self.config.get('DEDE_USER_ID', '')
+        cookie_content = (
+            "# Netscape HTTP Cookie File\n"
+            f".bilibili.com\tTRUE\t/\tFALSE\t0\tSESSDATA\t{sessdata}\n"
+            f".bilibili.com\tTRUE\t/\tFALSE\t0\tbili_jct\t{bili_jct}\n"
+            f".bilibili.com\tTRUE\t/\tFALSE\t0\tDedeUserID\t{dede_uid}\n"
         )
-        code, _, stderr = await self._run_process(
-            "yt-dlp", "-o", output_template,
-            # 只下载 480p 以下，AI 分析不需要高画质，减少 CDN 请求量降低风控风险
-            "--format", "bestvideo[height<=480]+bestaudio/best[height<=480]/worst",
-            "--no-playlist", "--merge-output-format", "mp4",
-            "--recode-video", "mp4",
-            "--add-header", cookie_header,
-            "--add-header", "Referer: https://www.bilibili.com",
-            "--limit-rate", "2M",
-            f"https://www.bilibili.com/video/{bvid}",
-            timeout=600,
-        )
+        try:
+            with open(cookie_file, "w") as f:
+                f.write(cookie_content)
+        except Exception as e:
+            logger.warning(f"[BiliBot] Cookie文件写入失败: {e}")
+            return None
+        try:
+            code, _, stderr = await self._run_process(
+                "yt-dlp", "-o", output_template,
+                # 只下载 480p 以下，AI 分析不需要高画质，减少 CDN 请求量降低风控风险
+                "--format", "bestvideo[height<=480]+bestaudio/best[height<=480]/worst",
+                "--no-playlist", "--merge-output-format", "mp4",
+                "--recode-video", "mp4",
+                "--cookies", cookie_file,
+                "--add-header", "Referer: https://www.bilibili.com",
+                "--limit-rate", "2M",
+                f"https://www.bilibili.com/video/{bvid}",
+                timeout=600,
+            )
+        finally:
+            try:
+                os.remove(cookie_file)
+            except OSError:
+                pass
         if code != 0:
             logger.warning(f"[BiliBot] 视频下载失败({bvid}): {stderr[:200]}")
             return None
