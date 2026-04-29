@@ -66,6 +66,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         else: logger.warning("[BiliBot] Cookie无效")
     async def _start_bot(self):
         if self._running: return
+        await self._ensure_buvid()
         self._mark_overdue_schedule_as_triggered_on_startup()
         self._running = True; self._task = asyncio.create_task(self._main_loop()); logger.info("[BiliBot] 启动")
     async def _stop_bot(self):
