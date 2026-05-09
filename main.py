@@ -739,25 +739,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
                 return
             bili_uid = bindings[qq_id]
 
-            sections = []
-
-            # 永久记忆（始终注入，这是Bot的自我认知）
-            perm = self._load_json(PERMANENT_MEMORY_FILE, [])
-            perm_texts = [f"[{p.get('time','?')}] {p['text']}" for p in perm[-10:] if p.get("text")]
-            if perm_texts:
-                sections.append("【B站侧长期记忆】\n" + "\n".join(perm_texts))
-
-            # 自动语义预检索（用当前消息搜记忆，阈值0.65避免噪声）
-            semantic_results = await self._search_memories(
-                msg, limit=3, source=None, memory_types=None,
-                user_id=None, score_threshold=0.65,
-            )
-            if semantic_results:
-                sections.append("【自动调取的相关记忆】\n" + "\n".join(semantic_results[:3]))
-
-            if sections:
-                req.system_prompt += f"\n\n【该用户已绑定B站UID:{bili_uid}】\n" + "\n\n".join(sections)
-                logger.debug(f"[BiliBot] QQ→B站记忆注入：perm={len(perm_texts)} semantic={len(semantic_results)}")
+            req.system_prompt += f"\n\n【该用户已绑定B站UID:{bili_uid}，如需回忆相关内容可使用recall系列工具查询】"
+            logger.debug(f"[BiliBot] QQ→B站绑定提示注入: uid={bili_uid}")
         except Exception as e:
             logger.error(f"[BiliBot] 记忆注入失败: {e}")
 
