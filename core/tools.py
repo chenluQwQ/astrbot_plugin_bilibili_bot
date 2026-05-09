@@ -24,11 +24,11 @@ def create_tools(plugin):
     @dataclass
     class RecallUserTool(FunctionTool[AstrAgentContext]):
         name: str = "recall_user"
-        description: str = f"查询某个B站用户的画像、印象、好感度和已知信息。每次对话对同一用户只查一次，查不到就说不了解。提示：你自己的B站UID是{bot_uid}，主人的UID是{owner_uid}（{owner_name}）。"
+        description: str = f"Look up a Bilibili user's profile, impression and affection. Your UID={bot_uid}, owner={owner_name}(UID:{owner_uid}). Call once per user per conversation."
         parameters: dict = Field(default_factory=lambda: {
             "type": "object",
             "properties": {
-                "user_id": {"type": "string", "description": "B站用户UID或用户名关键词"},
+                "user_id": {"type": "string", "description": "UID or username keyword"},
             },
             "required": ["user_id"],
         })
@@ -62,12 +62,12 @@ def create_tools(plugin):
     @dataclass
     class RecallConversationTool(FunctionTool[AstrAgentContext]):
         name: str = "recall_conversation"
-        description: str = "搜索交流/对话记忆，回忆和某个用户聊过什么。每次对话只调用一次，查不到就说没有相关记忆，不要重复调用。"
+        description: str = "Search chat memories by keyword. Call once, don't retry if empty."
         parameters: dict = Field(default_factory=lambda: {
             "type": "object",
             "properties": {
-                "keyword": {"type": "string", "description": "搜索关键词"},
-                "user_id": {"type": "string", "description": "可选，限定某个用户UID", "default": ""},
+                "keyword": {"type": "string", "description": "search keyword"},
+                "user_id": {"type": "string", "description": "optional, filter by UID", "default": ""},
             },
             "required": ["keyword"],
         })
@@ -83,11 +83,11 @@ def create_tools(plugin):
     @dataclass
     class RecallVideoTool(FunctionTool[AstrAgentContext]):
         name: str = "recall_video"
-        description: str = "搜索看过的视频记忆，回忆某个视频的内容和感想。每次对话只调用一次，查不到就说没有相关记忆，不要重复调用。"
+        description: str = "Search watched video memories. Call once, don't retry if empty."
         parameters: dict = Field(default_factory=lambda: {
             "type": "object",
             "properties": {
-                "keyword": {"type": "string", "description": "搜索关键词，如视频标题、UP主名、内容关键词"},
+                "keyword": {"type": "string", "description": "title, UP name, or topic"},
             },
             "required": ["keyword"],
         })
@@ -102,11 +102,11 @@ def create_tools(plugin):
     @dataclass
     class RecallDynamicTool(FunctionTool[AstrAgentContext]):
         name: str = "recall_dynamic"
-        description: str = "搜索动态相关记忆，回忆发过或看过的动态。每次对话只调用一次，查不到就说没有相关记忆，不要重复调用。"
+        description: str = "Search dynamic/post memories. Call once, don't retry if empty."
         parameters: dict = Field(default_factory=lambda: {
             "type": "object",
             "properties": {
-                "keyword": {"type": "string", "description": "搜索关键词"},
+                "keyword": {"type": "string", "description": "keyword"},
             },
             "required": ["keyword"],
         })
@@ -123,12 +123,12 @@ def create_tools(plugin):
     @dataclass
     class SearchBilibiliTool(FunctionTool[AstrAgentContext]):
         name: str = "search_bilibili"
-        description: str = "在B站搜索视频或UP主。当用户想看某类内容（如'我想看猫咪'、'有没有好看的游戏视频'）时也用这个搜索并推荐。不确定用户想搜什么时先问清楚。"
+        description: str = "Search Bilibili for videos or UPs. Also use when user wants content recommendations."
         parameters: dict = Field(default_factory=lambda: {
             "type": "object",
             "properties": {
-                "keyword": {"type": "string", "description": "搜索关键词"},
-                "search_type": {"type": "string", "description": "搜索类型：video=视频，user=UP主", "default": "video"},
+                "keyword": {"type": "string", "description": "search keyword"},
+                "search_type": {"type": "string", "description": "video or user", "default": "video"},
             },
             "required": ["keyword"],
         })
@@ -156,11 +156,11 @@ def create_tools(plugin):
     @dataclass
     class GetUpInfoTool(FunctionTool[AstrAgentContext]):
         name: str = "get_up_info"
-        description: str = f"查询B站UP主的详细信息、最近投稿和动态。不确定用户是否需要时先问。提示：你自己的B站UID是{bot_uid}，主人的UID是{owner_uid}（{owner_name}）。"
+        description: str = f"Get UP's detailed info, recent uploads and dynamics. Your UID={bot_uid}, owner={owner_name}(UID:{owner_uid})."
         parameters: dict = Field(default_factory=lambda: {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "UP主的UID或名字都可以"},
+                "query": {"type": "string", "description": "UID or name"},
             },
             "required": ["query"],
         })
@@ -211,11 +211,11 @@ def create_tools(plugin):
     @dataclass
     class WatchVideoTool(FunctionTool[AstrAgentContext]):
         name: str = "watch_video"
-        description: str = "去看一个B站视频，了解内容并存入记忆。不确定用户是否想让你看时先问。看完后可以选择调用like_video/coin_video/fav_video/follow_up/post_comment。"
+        description: str = "Watch a Bilibili video and save to memory. Can then use like/coin/fav/follow/comment tools."
         parameters: dict = Field(default_factory=lambda: {
             "type": "object",
             "properties": {
-                "bvid": {"type": "string", "description": "视频的BV号，如 BV1xx411x7xx"},
+                "bvid": {"type": "string", "description": "BV ID, e.g. BV1xx411x7xx"},
             },
             "required": ["bvid"],
         })
@@ -275,12 +275,12 @@ def create_tools(plugin):
     @dataclass
     class PostCommentTool(FunctionTool[AstrAgentContext]):
         name: str = "post_comment"
-        description: str = "在B站视频下发一条评论。需要用户同意或主动要求时才使用。"
+        description: str = "Post a comment on a Bilibili video. Only when user agrees or asks."
         parameters: dict = Field(default_factory=lambda: {
             "type": "object",
             "properties": {
-                "oid": {"type": "string", "description": "视频的oid（从watch_video结果中获取）"},
-                "comment_text": {"type": "string", "description": "要发的评论内容"},
+                "oid": {"type": "string", "description": "video oid from watch_video"},
+                "comment_text": {"type": "string", "description": "comment content"},
             },
             "required": ["oid", "comment_text"],
         })
@@ -297,11 +297,11 @@ def create_tools(plugin):
     @dataclass
     class LikeVideoTool(FunctionTool[AstrAgentContext]):
         name: str = "like_video"
-        description: str = "给B站视频点赞。需要用户同意或主动要求时才使用。"
+        description: str = "Like a Bilibili video. Only when user agrees or asks."
         parameters: dict = Field(default_factory=lambda: {
             "type": "object",
             "properties": {
-                "oid": {"type": "string", "description": "视频的oid（从watch_video结果中获取）"},
+                "oid": {"type": "string", "description": "video oid from watch_video"},
             },
             "required": ["oid"],
         })
@@ -313,12 +313,12 @@ def create_tools(plugin):
     @dataclass
     class CoinVideoTool(FunctionTool[AstrAgentContext]):
         name: str = "coin_video"
-        description: str = "给B站视频投币。需要用户同意或主动要求时才使用。"
+        description: str = "Give coins to a Bilibili video. Only when user agrees or asks."
         parameters: dict = Field(default_factory=lambda: {
             "type": "object",
             "properties": {
-                "oid": {"type": "string", "description": "视频的oid（从watch_video结果中获取）"},
-                "num": {"type": "string", "description": "投币数量，1或2", "default": "1"},
+                "oid": {"type": "string", "description": "video oid from watch_video"},
+                "num": {"type": "string", "description": "1 or 2", "default": "1"},
             },
             "required": ["oid"],
         })
@@ -331,11 +331,11 @@ def create_tools(plugin):
     @dataclass
     class FavVideoTool(FunctionTool[AstrAgentContext]):
         name: str = "fav_video"
-        description: str = "收藏B站视频到默认收藏夹。需要用户同意或主动要求时才使用。"
+        description: str = "Favorite a Bilibili video. Only when user agrees or asks."
         parameters: dict = Field(default_factory=lambda: {
             "type": "object",
             "properties": {
-                "oid": {"type": "string", "description": "视频的oid（从watch_video结果中获取）"},
+                "oid": {"type": "string", "description": "video oid from watch_video"},
             },
             "required": ["oid"],
         })
@@ -347,11 +347,11 @@ def create_tools(plugin):
     @dataclass
     class FollowUpTool(FunctionTool[AstrAgentContext]):
         name: str = "follow_up"
-        description: str = "关注B站UP主。需要用户同意或主动要求时才使用。"
+        description: str = "Follow a Bilibili UP. Only when user agrees or asks."
         parameters: dict = Field(default_factory=lambda: {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "UP主的UID或名字"},
+                "query": {"type": "string", "description": "UID or name"},
             },
             "required": ["query"],
         })
@@ -370,7 +370,7 @@ def create_tools(plugin):
     @dataclass
     class CheckFollowingUpdatesTool(FunctionTool[AstrAgentContext]):
         name: str = "check_following_updates"
-        description: str = "查看今天关注的UP主有没有人更新（发视频、发动态）。每次对话只调用一次。"
+        description: str = "Check today's updates from followed UPs. Call once per conversation."
         parameters: dict = Field(default_factory=lambda: {
             "type": "object",
             "properties": {},
@@ -395,7 +395,7 @@ def create_tools(plugin):
     @dataclass
     class CheckFollowingLiveTool(FunctionTool[AstrAgentContext]):
         name: str = "check_following_live"
-        description: str = "查看关注的UP主谁在直播。每次对话只调用一次。"
+        description: str = "Check which followed UPs are currently live streaming."
         parameters: dict = Field(default_factory=lambda: {
             "type": "object",
             "properties": {},
@@ -413,7 +413,7 @@ def create_tools(plugin):
     @dataclass
     class WatchVideosTool(FunctionTool[AstrAgentContext]):
         name: str = "bili_watch_videos"
-        description: str = "触发一次主动看B站视频流程。用户明确要求去看看/刷刷视频时使用。"
+        description: str = "Trigger proactive video browsing on Bilibili. Use when user asks to watch/browse videos."
         parameters: dict = Field(default_factory=lambda: {
             "type": "object",
             "properties": {},
