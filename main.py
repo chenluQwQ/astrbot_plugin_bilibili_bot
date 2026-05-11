@@ -1,5 +1,5 @@
 """
-AstrBot Plugin - Bilibili Bot 1.1.3
+AstrBot Plugin - Bilibili Bot 1.2.0
 自动回复评论、好感度、记忆、心情、用户画像、主动视频、动态发布。
 拆分版本：核心逻辑分布在 core/ 下的 Mixin 模块中。
 """
@@ -23,7 +23,7 @@ _astrbot_site_packages = os.path.join(os.path.expanduser("~"), ".astrbot", "data
 if os.path.isdir(_astrbot_site_packages) and _astrbot_site_packages not in sys.path:
     sys.path.insert(0, _astrbot_site_packages)
 
-@register("astrbot_plugin_bilibili_ai_bot","chenluQwQ","B站 AI Bot — 自动回复评论、好感度、记忆、心情、用户画像、主动视频、性格演化、动态发布、LLM工具调用","1.1.3","https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot")
+@register("astrbot_plugin_bilibili_ai_bot","chenluQwQ","B站 AI Bot — 自动回复评论、好感度、记忆、心情、用户画像、主动视频、性格演化、动态发布、LLM工具调用","1.13","https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot")
 class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, AffectionMixin, PersonalityMixin, BilibiliAPIMixin, BangumiMixin, WebSearchMixin, VideoMixin, ReplyMixin, ProactiveMixin, DynamicMixin, ScheduleMixin):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -53,6 +53,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         self._proactive_times, self._proactive_triggered = [], set()
         self._dynamic_task = None
         self._dynamic_times, self._dynamic_triggered = [], set()
+        self._bangumi_times, self._bangumi_triggered, self._bangumi_update_checked = [], set(), False
         self._log_environment_warnings()
         if self._has_cookie():
             asyncio.create_task(self._auto_start())
@@ -76,6 +77,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         if self._task: self._task.cancel(); self._task = None
         if self._proactive_task and not self._proactive_task.done(): self._proactive_task.cancel(); self._proactive_task = None
         if self._dynamic_task and not self._dynamic_task.done(): self._dynamic_task.cancel(); self._dynamic_task = None
+        if self._bangumi_task and not self._bangumi_task.done(): self._bangumi_task.cancel(); self._bangumi_task = None
         logger.info("[BiliBot] 停止")
 
     async def _main_loop(self):
@@ -124,26 +126,42 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
                                 self._save_dynamic_schedule_state(self._dynamic_times, self._dynamic_triggered)
                                 logger.info(f"[BiliBot] 📢 触发动态发布（{key}）")
                 if self.config.get("ENABLE_REPLY", True): await self._poll_unified()
-                # 番剧主动看番（简单概率触发，每日上限由 BANGUMI_DAILY_LIMIT 控制）
+                # 番剧主动看番（随机时间调度，与视频/动态一致）
                 if self.config.get("ENABLE_BANGUMI", False) and self.config.get("BANGUMI_PROACTIVE", False):
+                    now_dt = datetime.now(); today_str = now_dt.strftime("%Y-%m-%d")
+                    bsched = self._load_json(BANGUMI_SCHEDULE_FILE, {})
+                    if bsched.get("date") != today_str:
+                        self._bangumi_times, self._bangumi_triggered, self._bangumi_update_checked = self._generate_bangumi_schedule()
+                        logger.info(f"[BiliBot] 📅 番剧时间：{[f'{bh}:{bm:02d}' for bh,bm in self._bangumi_times]}")
+                    elif not self._bangumi_times:
+                        self._bangumi_times, self._bangumi_triggered, self._bangumi_update_checked = self._load_or_generate_bangumi_schedule()
                     if self._bangumi_task is None or self._bangumi_task.done():
-                        today_str = datetime.now().strftime("%Y-%m-%d")
-                        # 每天检查一次追番更新
-                        if not hasattr(self, '_bangumi_update_checked') or self._bangumi_update_checked != today_str:
-                            self._bangumi_update_checked = today_str
-                            self._bangumi_task = asyncio.create_task(self._check_bangumi_updates())
-                            logger.info("[BiliBot] 📺 触发每日追番更新检查")
+                        # 每天第一个番剧时间点先检查追番更新
+                        if not self._bangumi_update_checked:
+                            for bh, bm in self._bangumi_times:
+                                key = f"{bh}:{bm:02d}"
+                                if key not in self._bangumi_triggered and (now_dt.hour > bh or (now_dt.hour == bh and now_dt.minute >= bm)):
+                                    self._bangumi_update_checked = True
+                                    self._bangumi_task = asyncio.create_task(self._check_bangumi_updates())
+                                    self._bangumi_triggered.add(key)
+                                    self._save_bangumi_schedule_state(self._bangumi_times, self._bangumi_triggered, True)
+                                    trigger_log = self._load_json(PROACTIVE_TRIGGER_LOG_FILE, [])
+                                    trigger_log.append({"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "type": "bangumi_update_check", "scheduled": key, "status": "triggered"})
+                                    self._save_json(PROACTIVE_TRIGGER_LOG_FILE, trigger_log[-200:])
+                                    logger.info(f"[BiliBot] 📺 触发每日追番更新检查（{key}）")
+                                    break
                         else:
-                            bangumi_log = self._load_json(BANGUMI_WATCH_LOG_FILE, [])
-                            today_bangumi = [l for l in bangumi_log if l.get("time", "").startswith(today_str)]
-                            daily_limit = self.config.get("BANGUMI_DAILY_LIMIT", 1)
-                            bangumi_sessions_today = len(set(l.get("season_id", 0) for l in today_bangumi if l.get("season_id")))
-                            if bangumi_sessions_today < daily_limit:
-                                poll_interval = self.config.get("POLL_INTERVAL", 20)
-                                chance = poll_interval / 3600.0
-                                if random.random() < chance:
+                            for bh, bm in self._bangumi_times:
+                                key = f"{bh}:{bm:02d}"
+                                if key not in self._bangumi_triggered and (now_dt.hour > bh or (now_dt.hour == bh and now_dt.minute >= bm)):
                                     self._bangumi_task = asyncio.create_task(self._run_bangumi())
-                                    logger.info("[BiliBot] 🎬 触发主动看番")
+                                    self._bangumi_triggered.add(key)
+                                    self._save_bangumi_schedule_state(self._bangumi_times, self._bangumi_triggered, self._bangumi_update_checked)
+                                    trigger_log = self._load_json(PROACTIVE_TRIGGER_LOG_FILE, [])
+                                    trigger_log.append({"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "type": "bangumi_watch", "scheduled": key, "status": "triggered"})
+                                    self._save_json(PROACTIVE_TRIGGER_LOG_FILE, trigger_log[-200:])
+                                    logger.info(f"[BiliBot] 🎬 触发主动看番（{key}）")
+                                    break
                 await asyncio.sleep(self.config.get("POLL_INTERVAL", 20))
             except asyncio.CancelledError: break
             except Exception as e: logger.error(f"[BiliBot] 主循环出错: {e}\n{traceback.format_exc()}"); await asyncio.sleep(30)
@@ -228,7 +246,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         today_dynamic=len([l for l in dl if l.get("time","").startswith(datetime.now().strftime("%Y-%m-%d"))])
         schedule = self._get_schedule_snapshot()
         lines = [
-            f"📺 BiliBot 1.1.3 状态","━━━━━━━━━━━━",f"🍪 {info}",
+            f"📺 BiliBot 1.13 状态","━━━━━━━━━━━━",f"🍪 {info}",
             f"{'🟢 运行中' if self._running else '🔴 未运行'}",
             f"🧠 记忆:{mc}条 | 💎永久:{pmc}条 | 👤档案:{pc}个",
             f"🎭 心情:{mood} | 🌱性格v{evo_ver}（{evo_last[:10]}）",
@@ -257,6 +275,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             f"✅ 已触发主动：{', '.join(schedule['proactive_triggered']) if schedule['proactive_triggered'] else '暂无'}",
             f"📢 动态发布时间：{', '.join(schedule['dynamic_times']) if schedule['dynamic_times'] else '未生成'}",
             f"✅ 已触发动态：{', '.join(schedule['dynamic_triggered']) if schedule['dynamic_triggered'] else '暂无'}",
+            f"🎬 看番时间：{', '.join(schedule['bangumi_times']) if schedule.get('bangumi_times') else '未生成'}",
+            f"✅ 已触发看番：{', '.join(schedule['bangumi_triggered']) if schedule.get('bangumi_triggered') else '暂无'}",
         ]
         yield event.plain_result("\n".join(lines))
     @filter.command("bili分区")
