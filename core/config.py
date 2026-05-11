@@ -29,6 +29,7 @@ REPLIED_AT_FILE = os.path.join(DATA_DIR, "replied_at.json")
 REPLIED_CONTENT_KEYS_FILE = os.path.join(DATA_DIR, "replied_content_keys.json")
 BANGUMI_MEMORY_FILE = os.path.join(DATA_DIR, "bangumi_memory.json")
 BANGUMI_WATCH_LOG_FILE = os.path.join(DATA_DIR, "bangumi_watch_log.json")
+BANGUMI_SCHEDULE_FILE = os.path.join(DATA_DIR, "bangumi_schedule.json")
 PROACTIVE_TRIGGER_LOG_FILE = os.path.join(DATA_DIR, "proactive_trigger_log.json")
 WEB_SEARCH_CACHE_FILE = os.path.join(DATA_DIR, "web_search_cache.json")
 
