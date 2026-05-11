@@ -5,6 +5,7 @@ from .memory import MemoryMixin
 from .affection import AffectionMixin
 from .personality import PersonalityMixin
 from .bilibili import BilibiliAPIMixin
+from .bangumi import BangumiMixin
 from .search import WebSearchMixin
 from .video import VideoMixin
 from .reply import ReplyMixin
@@ -20,6 +21,7 @@ __all__ = [
     "AffectionMixin",
     "PersonalityMixin",
     "BilibiliAPIMixin",
+    "BangumiMixin",
     "WebSearchMixin",
     "VideoMixin",
     "ReplyMixin",

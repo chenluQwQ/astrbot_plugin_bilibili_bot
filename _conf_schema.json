@@ -188,6 +188,48 @@
     "default": "",
     "hint": "例如：推荐语要简短可爱，带点撒娇。会影响@主人时的推荐语风格。"
   },
+  "ENABLE_BANGUMI": {
+    "description": "【番剧】启用番剧功能（看番、搜番、番剧记忆）",
+    "type": "bool",
+    "default": false
+  },
+  "BANGUMI_PROACTIVE": {
+    "description": "【番剧】启用主动看番（定时自动随机看番）",
+    "type": "bool",
+    "default": false
+  },
+  "BANGUMI_EPISODE_COUNT": {
+    "description": "【番剧】每次看番最多追更几集",
+    "type": "int",
+    "default": 3,
+    "hint": "评分高会继续追，但不超过此上限"
+  },
+  "BANGUMI_CONTINUE_SCORE": {
+    "description": "【番剧】追更阈值（评分≥此值才继续看下一集）",
+    "type": "int",
+    "default": 7
+  },
+  "BANGUMI_DAILY_LIMIT": {
+    "description": "【番剧】每天主动看番的次数上限",
+    "type": "int",
+    "default": 1
+  },
+  "BANGUMI_COMMENT": {
+    "description": "【番剧】看番时评论（≥6分）",
+    "type": "bool",
+    "default": true
+  },
+  "BANGUMI_AUTO_FOLLOW": {
+    "description": "【番剧】评分≥7时自动追番",
+    "type": "bool",
+    "default": true
+  },
+  "BANGUMI_POOLS": {
+    "description": "【番剧】番剧来源池",
+    "type": "list",
+    "default": ["trending", "timeline"],
+    "hint": "可选: trending(热度排行) / timeline(当季新番)"
+  },
   "DYNAMIC_TIMES_COUNT": {
     "description": "【动态发布】每天触发几次动态发布",
     "type": "int",

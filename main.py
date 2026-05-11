@@ -4,7 +4,7 @@ AstrBot Plugin - Bilibili Bot 1.2.0
 拆分版本：核心逻辑分布在 core/ 下的 Mixin 模块中。
 """
 import sys
-import io, os, time, asyncio, traceback
+import io, os, time, asyncio, random, traceback
 from datetime import datetime
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -15,7 +15,7 @@ from .core.config import *
 from .core import (
     UtilsMixin, LLMMixin, VisionMixin, MemoryMixin,
     AffectionMixin, PersonalityMixin, BilibiliAPIMixin,
-    WebSearchMixin, VideoMixin, ReplyMixin,
+    BangumiMixin, WebSearchMixin, VideoMixin, ReplyMixin,
     ProactiveMixin, DynamicMixin, ScheduleMixin,
 )
 
@@ -24,7 +24,7 @@ if os.path.isdir(_astrbot_site_packages) and _astrbot_site_packages not in sys.p
     sys.path.insert(0, _astrbot_site_packages)
 
 @register("astrbot_plugin_bilibili_ai_bot","chenluQwQ","B站 AI Bot — 自动回复评论、好感度、记忆、心情、用户画像、主动视频、性格演化、动态发布、LLM工具调用","1.1.2","https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot")
-class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, AffectionMixin, PersonalityMixin, BilibiliAPIMixin, WebSearchMixin, VideoMixin, ReplyMixin, ProactiveMixin, DynamicMixin, ScheduleMixin):
+class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, AffectionMixin, PersonalityMixin, BilibiliAPIMixin, BangumiMixin, WebSearchMixin, VideoMixin, ReplyMixin, ProactiveMixin, DynamicMixin, ScheduleMixin):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
@@ -32,10 +32,12 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         self._running = False
         self._task = None
         self._proactive_task = None
+        self._bangumi_task = None
         self._last_cookie_check = 0
         self._login_qrcode_key = None
         self._first_poll = True
         self._replied_at = set(self._load_json(REPLIED_AT_FILE, []))
+        self._replied_content_keys = set(self._load_json(REPLIED_CONTENT_KEYS_FILE, []))
         self._affection = self._load_json(AFFECTION_FILE, {})
         owner_mid = str(self.config.get("OWNER_MID", "") or "").strip()
         if owner_mid:
@@ -122,6 +124,26 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
                                 self._save_dynamic_schedule_state(self._dynamic_times, self._dynamic_triggered)
                                 logger.info(f"[BiliBot] 📢 触发动态发布（{key}）")
                 if self.config.get("ENABLE_REPLY", True): await self._poll_unified()
+                # 番剧主动看番（简单概率触发，每日上限由 BANGUMI_DAILY_LIMIT 控制）
+                if self.config.get("ENABLE_BANGUMI", False) and self.config.get("BANGUMI_PROACTIVE", False):
+                    if self._bangumi_task is None or self._bangumi_task.done():
+                        today_str = datetime.now().strftime("%Y-%m-%d")
+                        # 每天检查一次追番更新
+                        if not hasattr(self, '_bangumi_update_checked') or self._bangumi_update_checked != today_str:
+                            self._bangumi_update_checked = today_str
+                            self._bangumi_task = asyncio.create_task(self._check_bangumi_updates())
+                            logger.info("[BiliBot] 📺 触发每日追番更新检查")
+                        else:
+                            bangumi_log = self._load_json(BANGUMI_WATCH_LOG_FILE, [])
+                            today_bangumi = [l for l in bangumi_log if l.get("time", "").startswith(today_str)]
+                            daily_limit = self.config.get("BANGUMI_DAILY_LIMIT", 1)
+                            bangumi_sessions_today = len(set(l.get("season_id", 0) for l in today_bangumi if l.get("season_id")))
+                            if bangumi_sessions_today < daily_limit:
+                                poll_interval = self.config.get("POLL_INTERVAL", 20)
+                                chance = poll_interval / 3600.0
+                                if random.random() < chance:
+                                    self._bangumi_task = asyncio.create_task(self._run_bangumi())
+                                    logger.info("[BiliBot] 🎬 触发主动看番")
                 await asyncio.sleep(self.config.get("POLL_INTERVAL", 20))
             except asyncio.CancelledError: break
             except Exception as e: logger.error(f"[BiliBot] 主循环出错: {e}\n{traceback.format_exc()}"); await asyncio.sleep(30)
@@ -511,6 +533,12 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             if isinstance(replied, list) and len(replied) > 2000:
                 self._save_json(REPLIED_FILE, replied[-2000:])
                 msg_lines.append(f"  ✅ 已回复记录：{len(replied)}→2000条")
+            # 清理过期的内容去重指纹（只保留最近2000条）
+            content_keys = self._load_json(REPLIED_CONTENT_KEYS_FILE, [])
+            if isinstance(content_keys, list) and len(content_keys) > 2000:
+                self._save_json(REPLIED_CONTENT_KEYS_FILE, content_keys[-2000:])
+                self._replied_content_keys = set(content_keys[-2000:])
+                msg_lines.append(f"  ✅ 内容去重指纹：{len(content_keys)}→2000条")
             msg_lines.append("")
             msg_lines.append("💡 提示：如需完全重置，手动删除 plugin_data/astrbot_plugin_bilibili_ai_bot 目录")
         else:
@@ -619,7 +647,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         today_watch = [l for l in wl if l.get("time", "").startswith(target_date)]
         # 评论日志
         pl = self._load_json(PROACTIVE_LOG_FILE, [])
-        today_comment = [l for l in pl if l.get("time", "").startswith(target_date)]
+        today_comment = [l for l in pl if l.get("time", "").startswith(target_date) and l.get("type") != "bangumi"]
         if not today_watch and not today_comment:
             yield event.plain_result(f"📋 {target_date} 没有主动行为记录")
             return
@@ -692,9 +720,97 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             lines.append(f"   {l.get('text','')[:60]}...")
         yield event.plain_result("\n".join(lines))
 
+    @filter.command("bili看番")
+    async def cmd_watch_bangumi(self, event: AstrMessageEvent):
+        """手动触发看番。用法: /bili看番 [season_id]"""
+        if not self.config.get("ENABLE_BANGUMI", False):
+            yield event.plain_result("⚠️ 番剧功能未开启（ENABLE_BANGUMI）")
+            return
+        if not self._has_cookie():
+            yield event.plain_result("⚠️ 未登录B站")
+            return
+        if self._bangumi_task is not None and not self._bangumi_task.done():
+            yield event.plain_result("⚠️ 已经在看番了，等这轮看完吧")
+            return
+        parts = event.message_str.strip().split(maxsplit=1)
+        season_id = None
+        if len(parts) >= 2 and parts[1].strip().isdigit():
+            season_id = int(parts[1].strip())
+        self._bangumi_task = asyncio.create_task(self._run_bangumi(season_id=season_id))
+        yield event.plain_result(f"🎬 开始看番{'（sid=' + str(season_id) + '）' if season_id else '（随机选番）'}...")
+
+    @filter.command("bili番剧日志")
+    async def cmd_bangumi_log(self, event: AstrMessageEvent):
+        """查看番剧观看记录。用法: /bili番剧日志 [日期YYYY-MM-DD]"""
+        parts = event.message_str.strip().split(maxsplit=1)
+        target_date = parts[1].strip() if len(parts) >= 2 else datetime.now().strftime("%Y-%m-%d")
+        log = self._load_json(BANGUMI_WATCH_LOG_FILE, [])
+        today_log = [l for l in log if l.get("time", "").startswith(target_date)]
+        if not today_log:
+            yield event.plain_result(f"🎬 {target_date} 没有看番记录")
+            return
+        lines = [f"🎬 {target_date} 看番日志（共 {len(today_log)} 集）", "━━━━━━━━━━━━"]
+        for i, l in enumerate(today_log, 1):
+            t = l.get("time", "?")
+            time_part = t.split(" ", 1)[1] if " " in t else t
+            lines.append(f"{i}. [{time_part}] 《{l.get('title', '?')}》第{l.get('ep_index', '?')}话")
+            lines.append(f"   ⭐{l.get('score', '?')}/10 {l.get('mood', '')} {l.get('review', '')[:40]}")
+            if l.get("comment"):
+                lines.append(f"   💬 {l['comment'][:40]}")
+        yield event.plain_result("\n".join(lines))
+
+    @filter.command("bili番剧记忆")
+    async def cmd_bangumi_memory(self, event: AstrMessageEvent):
+        """查看番剧追番记忆。用法: /bili番剧记忆"""
+        mem = self._load_bangumi_memory()
+        if not mem:
+            yield event.plain_result("🎬 还没有看过任何番剧")
+            return
+        lines = [f"🎬 追番记忆（共 {len(mem)} 部）", "━━━━━━━━━━━━"]
+        for sid, record in sorted(mem.items(), key=lambda x: x[1].get("episodes", [{}])[-1].get("watched_at", ""), reverse=True)[:15]:
+            title = record.get("title", "?")
+            total = record.get("total_watched", 0)
+            watched_eps = record.get("watched_eps", [])
+            last_score = record.get("last_score", "?")
+            ep_str = ",".join(watched_eps[:20]) if watched_eps else "?"
+            lines.append(f"  《{title}》已看{total}集 [{ep_str}] 最近评分:{last_score}")
+        yield event.plain_result("\n".join(lines))
+
+    @filter.command("bili回复日志")
+    async def cmd_reply_log(self, event: AstrMessageEvent):
+        """查看某天的评论回复记录。用法: /bili回复日志 [日期YYYY-MM-DD]"""
+        parts = event.message_str.strip().split(maxsplit=1)
+        target_date = parts[1].strip() if len(parts) >= 2 else datetime.now().strftime("%Y-%m-%d")
+        memory = self._load_json(MEMORY_FILE, [])
+        chats = [m for m in memory if m.get("memory_type") == "chat" and m.get("time", "").startswith(target_date)]
+        if not chats:
+            yield event.plain_result(f"💬 {target_date} 没有回复记录")
+            return
+        lines = [f"💬 {target_date} 回复日志（共 {len(chats)} 条）", "━━━━━━━━━━━━"]
+        for i, c in enumerate(chats, 1):
+            username = c.get("username", "?")
+            t = c.get("time", "?")
+            time_part = t.split(" ", 1)[1] if " " in t else t
+            text = c.get("text", "")
+            # 从 text 里提取用户内容和bot回复
+            user_msg = ""
+            bot_reply = ""
+            if "说：" in text and "| Bot回复：" in text:
+                after_said = text.split("说：", 1)[1]
+                parts2 = after_said.split(" | Bot回复：", 1)
+                user_msg = parts2[0].strip()[:60]
+                bot_reply = parts2[1].strip()[:60] if len(parts2) > 1 else ""
+            else:
+                user_msg = text[:80]
+            lines.append(f"{i}. [{time_part}] {username}")
+            lines.append(f"   📨 {user_msg}")
+            if bot_reply:
+                lines.append(f"   💬 {bot_reply}")
+        yield event.plain_result("\n".join(lines))
+
     @filter.command("bili帮助")
     async def cmd_help(self, event: AstrMessageEvent):
-        yield event.plain_result("📺 BiliBot 命令\n━━━━━━━━━━━━\n/bili登录 — 扫码登录\n/bili确认 — 确认扫码\n/bili状态 — 运行状态\n/bili计划 — 查看今日主动/动态时间\n/bili分区 — 查看B站分区编号（配置视频池用）\n/bili启动 — 启动\n/bili停止 — 停止\n/bili主动 — 立刻触发一次主动看视频\n/bili开关 — 功能开关\n/bili刷新 — 刷新Cookie\n/bili记忆 — 搜索记忆\n/bili好感 — 好感度\n/bili拉黑 — 手动拉黑\n/bili解黑 — 解除拉黑\n/bili黑名单 — 查看黑名单\n/bili性格 — 查看性格演化\n/bili性格编辑 — 手动编辑性格\n/bili性格删除 — 删除演化条目\n/bili日志 — 今日视频/评论日志\n/bili永久记忆 — 查看/删除永久记忆\n/bili动态 — 手动发动态\n/bili动态日志 — 动态记录\n/bili绑定 — 绑定QQ与B站UID\n/bili解绑 — 解除绑定\n/bili清理 — 清理临时文件\n/bili帮助 — 本帮助\n━━━━━━━━━━━━\n💡 首次用 /bili登录\n💡 直接在聊天里让 Bot 去随机看B站视频，也会尝试触发一次主动看视频")
+        yield event.plain_result("📺 BiliBot 命令\n━━━━━━━━━━━━\n/bili登录 — 扫码登录\n/bili确认 — 确认扫码\n/bili状态 — 运行状态\n/bili计划 — 查看今日主动/动态时间\n/bili分区 — 查看B站分区编号（配置视频池用）\n/bili启动 — 启动\n/bili停止 — 停止\n/bili主动 — 立刻触发一次主动看视频\n/bili开关 — 功能开关\n/bili刷新 — 刷新Cookie\n/bili记忆 — 搜索记忆\n/bili好感 — 好感度\n/bili拉黑 — 手动拉黑\n/bili解黑 — 解除拉黑\n/bili黑名单 — 查看黑名单\n/bili性格 — 查看性格演化\n/bili性格编辑 — 手动编辑性格\n/bili性格删除 — 删除演化条目\n/bili日志 — 今日视频/评论日志\n/bili回复日志 — 查看某天的回复记录\n/bili看番 — 手动触发看番\n/bili番剧日志 — 查看看番记录\n/bili番剧记忆 — 查看追番进度\n/bili永久记忆 — 查看/删除永久记忆\n/bili动态 — 手动发动态\n/bili动态日志 — 动态记录\n/bili绑定 — 绑定QQ与B站UID\n/bili解绑 — 解除绑定\n/bili清理 — 清理临时文件\n/bili帮助 — 本帮助\n━━━━━━━━━━━━\n💡 首次用 /bili登录\n💡 直接在聊天里让 Bot 去随机看B站视频，也会尝试触发一次主动看视频")
 
     # ===== QQ↔B站 记忆互通 =====
     @filter.command("bili绑定")
