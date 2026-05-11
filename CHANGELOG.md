@@ -1,84 +1,58 @@
-# 更新日志
-
-## v1.1.2 (2026-04-26)
-
-### 🔧 Bug 修复
-
-- **动态获取四层 bug 修复**
-  - 修复 `dict.get(key, {})` 在值为 `None` 时不返回默认值的问题（经典 Python 陷阱）
-  - 修复 `comment_type=11` 时错误地将 doc_id 当作 dynamic_id 传给详情 API
-  - 修复 B站动态详情 API 缺少 `features` 参数导致返回空数据
-  - 修复 B站 opus 格式动态的文字和图片解析路径（`major.opus.summary.text` / `major.opus.pics`）
-- **所有 B站 web-dynamic 系列 API 统一补充 `features=itemOpusStyle,listOnlyfans,opusBigCover,onlyfansVote` 参数**
-  - `x/polymer/web-dynamic/v1/detail`
-  - `x/polymer/web-dynamic/v1/feed/space`
-  - `x/polymer/web-dynamic/v1/feed/all`
+## v1.1.3 (2026-05-11)
 
 ### ✨ 新增功能
 
-- **工具调用体系重构：FunctionTool 模式**
-  - 所有 LLM 工具从 `@filter.llm_tool` 迁移到 `FunctionTool` 类定义（`core/tools.py`）
-  - 工具返回结果回到 LLM 上下文，由 LLM 按人设风格重新生成回复，不再直接暴露原始数据给用户
+#### 📺 番剧观看体系
 
-- **新增 15 个 LLM 工具**
+- 新增 `/bili看番` 命令
+  - 支持搜索番剧并选择具体番剧
+  - 支持获取番剧详情（评分、简介、更新状态、分集信息等）
+  - 支持完整观看单集内容
+  - 自动获取并分析：
+    - 视频字幕
+    - 热评
+    - 评论区讨论
+    - 用户评价
+  - 看完后自动生成番剧观看记忆
 
-  **记忆类（4 个）：**
-  - `recall_user` — 查询用户画像 / 印象 / 好感度，支持 UID 或用户名模糊搜索
-  - `recall_conversation` — 语义搜索对话记忆，可限定用户
-  - `recall_video` — 搜索看过的视频记忆
-  - `recall_dynamic` — 搜索动态相关记忆
+- 新增 QQ 工具调用：`霜序去看番`
+  - 可在 QQ 聊天中直接要求 Bot 去看番
+  - 当前默认只观看 1 集
 
-  **B站查询类（3 个）：**
-  - `search_bilibili` — 搜索视频或 UP 主，支持用户想看某类内容时推荐视频
-  - `get_up_info` — 查询 UP 主详细信息 + 最近投稿 + 最近动态，支持 UID 或名字输入
-  - `watch_video` — 去看一个视频（拉信息 + AI 分析 + 评分 + 存记忆），看完后可链式调用互动工具
+- 新增 `/bili番剧记忆`
+  - 查看番剧观看后的记忆存储结果
+  - 用于验证番剧记忆是否正确写入
 
-  **B站操作类（5 个）：**
-  - `post_comment` — 在视频下发评论
-  - `like_video` — 点赞
-  - `coin_video` — 投币（1 或 2 个）
-  - `fav_video` — 收藏到默认收藏夹
-  - `follow_up` — 关注 UP 主，支持 UID 或名字输入
+### 🔎 新增番剧查询工具
 
-  **关注动态类（2 个）：**
-  - `check_following_updates` — 查看今天关注的 UP 主有没有人更新（视频 / 动态 / 直播）
-  - `check_following_live` — 查看关注的人谁在直播（标题 / 分区 / 人气 / 链接）
+- `get_bangumi_timeline`
+  - 查询最近新番时间线
+  - 支持“最近有什么新番”等自然语言调用
 
-  **主动行为（1 个）：**
-  - `bili_watch_videos` — 触发一次主动看视频流程
+- `get_bangumi_trending`
+  - 获取热门番剧排行
+  - 支持“番剧排行”等查询
 
-- **新增 B站 API 方法**（`core/bilibili.py`）
-  - `search_bilibili_videos` — 视频搜索（WBI 签名）
-  - `search_bilibili_users` — 用户搜索（WBI 签名）
-  - `get_up_info` — UP 主详细信息（WBI 签名）
-  - `get_up_recent_videos` — UP 主最近投稿列表（WBI 签名）
-  - `get_up_recent_dynamics` — UP 主最近动态（opus 格式兼容）
-  - `get_following_updates` — 关注动态流（今日更新过滤）
-  - `get_following_live` — 关注直播列表
+- `search_bilibili(bangumi)`
+  - 搜索番剧
+  - 支持通过番名模糊搜索
 
-### 🎨 优化
+- `get_bangumi_info`
+  - 获取番剧详细信息
+  - 包括评分、简介、演员、分集、播放状态等
 
-- **配置界面重排**（`_conf_schema.json`）
-  - 按功能分组并以【标签】前缀标注：人设 → 账号 → 功能开关 → 回复 → 主动行为 → 动态发布 → 性格演化 → 记忆 → 视觉模型 → 联网搜索 → 图片生成 → 系统
-  - 核心设置排最前，小功能靠后
+### 🎯 追番系统
 
-- **工具描述优化**
-  - 所有工具加入"不确定时先问用户"的行为约束
-  - 记忆类工具加入"每次对话只调用一次，查不到就说没有"防止循环调用
-  - 操作类工具加入"需要用户同意或主动要求时才使用"的约束
-  - Bot 自身 UID 和主人 UID 注入到相关工具描述中
+- 看完番剧后若评分 ≥ 7 分
+  - 自动加入追番列表
+  - 日志新增：`📌 追番成功`
 
-- **视频内容详情长度调整**
-  - 工具返回的视频内容详情从 500 字扩展到 800 字
-  - 记忆存储的视频内容从 200 字扩展到 500 字
+- 新增 `get_bangumi_updates`
+  - 查询已追番剧更新情况
+  - 支持“我追的番更新了吗”等自然语言调用
 
-- **视频分析加入字幕读取**
-  - 新增 `_get_video_subtitles` 方法，通过 `x/player/v2` API 获取视频字幕（优先中文）
-  - 字幕文本注入分析提示词，大幅提升内容概括质量
-  - 分析输出从 300 字提升到 500 字
+### 🔧 Bug 修复
 
-- **提示词体系优化**
-  - "额外指令"统一改为"补充提示词"
-  - 默认系统提示词从"B站UP主的AI助手"改为更自然的描述
-  - 新增配置项：好感度行为补充提示词（`CUSTOM_AFFECTION_INSTRUCTION`）
-  - 新增配置项：推荐视频给主人的补充提示词（`CUSTOM_RECOMMEND_INSTRUCTION`）
+- 评论区重复回复修复
+  - 新增评论去重逻辑
+  - 修复部分情况下 Bot 对同一评论重复回复的问题
