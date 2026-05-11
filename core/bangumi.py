@@ -387,7 +387,7 @@ class BangumiMixin:
     # ══════════════════════════════════════
 
     async def _analyze_bangumi_episode(self, season_info, ep_info):
-        """分析番剧单集：复用视频分析流程（封面视觉+字幕+热评）。"""
+        """分析番剧单集：封面视觉+字幕+热评（跳过视频下载，番剧PGC内容无法下载）。"""
         try:
             aid = ep_info.get("aid", 0)
             cid = ep_info.get("cid", 0)
@@ -398,7 +398,7 @@ class BangumiMixin:
                 except Exception:
                     pass
 
-            # 构造 video_info 格式，复用视频分析
+            # 构造 video_info 格式，复用文本分析（不走视频下载）
             ep_title = ep_info.get("long_title", "") or ep_info.get("title", "")
             video_info = {
                 "bvid": bvid,
@@ -413,8 +413,9 @@ class BangumiMixin:
                 "oid": aid,
             }
 
-            # 走视频分析（封面视觉 + 字幕 + 热评 + 联网搜索）
-            analysis = await self._analyze_video_with_vision(video_info)
+            # 番剧用纯文本分析（封面+字幕+热评+联网搜索），跳过视频下载
+            # PGC内容无法通过yt-dlp下载，走_analyze_video_media会白白失败
+            analysis = await self._analyze_video_text(video_info)
 
             # 保底
             if not analysis or len(analysis) < 20:
@@ -530,6 +531,15 @@ want_continue：这番是否值得继续追。
             if sid not in seen:
                 seen.add(sid)
                 unique.append(c)
+
+        # 排除已看完的番（bangumi_memory 中 completed=True 的）
+        completed_sids = {sid for sid, record in mem.items() if record.get("completed")}
+        if completed_sids:
+            before_count = len(unique)
+            unique = [c for c in unique if str(c["season_id"]) not in completed_sids]
+            filtered = before_count - len(unique)
+            if filtered:
+                logger.info(f"[BiliBot] 🎬 排除已看完的番剧 {filtered} 部")
 
         # 优先选有未看集数的（追更中的优先）
         prioritized = []
@@ -715,6 +725,13 @@ want_continue：这番是否值得继续追。
                 logger.warning(f"[BiliBot] 指定的 ep_id={start_ep_id} 未找到，从未看的开始")
         if not unwatched:
             logger.info(f"[BiliBot] 《{season_info['title']}》已全部看完")
+            # 标记为已看完，选番时排除
+            mem = self._load_bangumi_memory()
+            sid = str(season_id)
+            if sid in mem:
+                mem[sid]["completed"] = True
+                self._save_json(BANGUMI_MEMORY_FILE, mem)
+                logger.info(f"[BiliBot] 📌 标记《{season_info['title']}》为已看完")
             return
 
         watch_log = self._load_json(BANGUMI_WATCH_LOG_FILE, [])
@@ -883,3 +900,4 @@ want_continue：这番是否值得继续追。
                 pass
         self._bangumi_task = asyncio.create_task(self._run_bangumi(season_id=season_id, start_ep_id=ep_id, max_episodes=1))
         return "好的，开始看番了！看完会记录感想。"
+        
