@@ -900,4 +900,3 @@ want_continue：这番是否值得继续追。
                 pass
         self._bangumi_task = asyncio.create_task(self._run_bangumi(season_id=season_id, start_ep_id=ep_id, max_episodes=1))
         return "好的，开始看番了！看完会记录感想。"
-        

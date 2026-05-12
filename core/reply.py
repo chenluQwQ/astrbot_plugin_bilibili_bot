@@ -9,7 +9,7 @@ from astrbot.api import logger
 from .config import (
     AFFECTION_FILE, DATA_DIR, LEVEL_NAMES,
     PERMANENT_MEMORY_FILE, REPLIED_AT_FILE, REPLIED_FILE,
-    REPLIED_CONTENT_KEYS_FILE,
+    REPLIED_CONTENT_KEYS_FILE, REPLY_LOG_FILE,
     BILI_AT_NOTIFY_URL, BILI_NOTIFY_URL,
 )
 
@@ -145,6 +145,16 @@ class ReplyMixin:
         logger.info(f"[BiliBot] 💬 {username}: {ai_reply[:50]}")
         success = await self._send_reply(oid, rpid, comment_type, ai_reply)
         if success:
+            # 写入独立的回复日志（不受记忆压缩影响）
+            reply_log = self._load_json(REPLY_LOG_FILE, [])
+            reply_log.append({
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "mid": str(mid), "username": username,
+                "content": content[:100], "reply": ai_reply[:100],
+                "oid": str(oid), "rpid": str(rpid),
+                "score_delta": sd,
+            })
+            self._save_json(REPLY_LOG_FILE, reply_log[-500:])
             await self._save_memory_record(rpid, thread_id, mid, username, content, ai_reply, oid=oid)
             await self._compress_thread_memory(thread_id)
             await self._compress_oid_memory(oid)

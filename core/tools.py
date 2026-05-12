@@ -81,6 +81,65 @@ def create_tools(plugin):
             return "对话记忆:\n" + "\n".join(f"{i}. {r}" for i, r in enumerate(results, 1))
 
     @dataclass
+    class RecallTodayTool(FunctionTool[AstrAgentContext]):
+        name: str = "recall_today"
+        description: str = "查看今天/最近的所有活动记录（看视频、番剧、回复、动态），按时间列出。Use when user asks: 今天干了什么, 今天的记忆, 今天看了什么, 最近做了什么, what did you do today."
+        parameters: dict = Field(default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "date": {"type": "string", "description": "日期YYYY-MM-DD, default today", "default": ""},
+            },
+        })
+
+        async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> ToolExecResult:
+            target_date = kwargs.get("date", "") or datetime.now().strftime("%Y-%m-%d")
+            parts = []
+            # 1. 视频观看日志
+            from .config import WATCH_LOG_FILE, BANGUMI_WATCH_LOG_FILE, REPLY_LOG_FILE, PROACTIVE_LOG_FILE, DYNAMIC_LOG_FILE
+            wl = plugin._load_json(WATCH_LOG_FILE, [])
+            today_watch = [l for l in wl if l.get("time", "").startswith(target_date)]
+            if today_watch:
+                vlines = [f"🎬 看了 {len(today_watch)} 个视频:"]
+                for w in today_watch:
+                    vlines.append(f"  [{w.get('time','?').split(' ',1)[-1]}] 「{w.get('title','?')[:30]}」{w.get('score','?')}分 {w.get('mood','?')} {w.get('review','')[:40]}")
+                parts.append("\n".join(vlines))
+            # 2. 番剧日志
+            bl = plugin._load_json(BANGUMI_WATCH_LOG_FILE, [])
+            today_bangumi = [l for l in bl if l.get("time", "").startswith(target_date)]
+            if today_bangumi:
+                blines = [f"📺 看了 {len(today_bangumi)} 集番剧:"]
+                for b in today_bangumi:
+                    blines.append(f"  [{b.get('time','?').split(' ',1)[-1]}] 《{b.get('title','?')}》第{b.get('ep_index','?')}话 {b.get('score','?')}分 {b.get('mood','?')}")
+                parts.append("\n".join(blines))
+            # 3. 回复日志
+            rl = plugin._load_json(REPLY_LOG_FILE, [])
+            today_reply = [r for r in rl if r.get("time", "").startswith(target_date)]
+            if today_reply:
+                rlines = [f"💬 回复了 {len(today_reply)} 条评论:"]
+                for r in today_reply:
+                    rlines.append(f"  [{r.get('time','?').split(' ',1)[-1]}] {r.get('username','?')}: {r.get('content','')[:30]} → {r.get('reply','')[:30]}")
+                parts.append("\n".join(rlines))
+            # 4. 主动评论
+            pl = plugin._load_json(PROACTIVE_LOG_FILE, [])
+            today_comment = [c for c in pl if c.get("time", "").startswith(target_date)]
+            if today_comment:
+                clines = [f"📝 发了 {len(today_comment)} 条主动评论:"]
+                for c in today_comment:
+                    clines.append(f"  [{c.get('time','?').split(' ',1)[-1]}] 「{c.get('title','')[:20]}」{c.get('comment','')[:40]}")
+                parts.append("\n".join(clines))
+            # 5. 动态
+            dl = plugin._load_json(DYNAMIC_LOG_FILE, [])
+            today_dynamic = [d for d in dl if d.get("time", "").startswith(target_date)]
+            if today_dynamic:
+                dlines = [f"📢 发了 {len(today_dynamic)} 条动态:"]
+                for d in today_dynamic:
+                    dlines.append(f"  [{d.get('time','?').split(' ',1)[-1]}] {d.get('content','')[:50]}")
+                parts.append("\n".join(dlines))
+            if not parts:
+                return f"{target_date} 没有任何活动记录。"
+            return f"📋 {target_date} 活动总览:\n\n" + "\n\n".join(parts)
+
+    @dataclass
     class RecallVideoTool(FunctionTool[AstrAgentContext]):
         name: str = "recall_video"
         description: str = "Search watched video memories. Call once, don't retry if empty."
@@ -611,6 +670,7 @@ def create_tools(plugin):
         # 记忆类
         RecallUserTool(),
         RecallConversationTool(),
+        RecallTodayTool(),
         RecallVideoTool(),
         RecallDynamicTool(),
         RecallBangumiTool(),

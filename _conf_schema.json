@@ -123,9 +123,14 @@
     "default": "这个人多次恶意攻击你。平静坚定划清界限，回复极简短，不恶语相向。"
   },
   "PROACTIVE_VIDEO_COUNT": {
-    "description": "【主动行为】每天主动看几个视频",
+    "description": "【主动行为】每次主动看几个视频",
     "type": "int",
     "default": 3
+  },
+  "PROACTIVE_DAILY_LIMIT": {
+    "description": "【主动行为】每天最多看几个视频（所有来源合计，0=不限制）",
+    "type": "int",
+    "default": 0
   },
   "PROACTIVE_COMMENT_COUNT": {
     "description": "【主动行为】每天主动评论几条",
