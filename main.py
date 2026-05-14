@@ -109,6 +109,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
                                 trigger_log.append({"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "type": "proactive_video", "scheduled": key, "status": "triggered"})
                                 self._save_json(PROACTIVE_TRIGGER_LOG_FILE, trigger_log[-200:])
                                 logger.info(f"[BiliBot] 🎯 触发主动视频（{key}）")
+                                break
                 if self.config.get("ENABLE_DYNAMIC", False):
                     now_dt = datetime.now(); today_str = now_dt.strftime("%Y-%m-%d")
                     sched = self._load_json(DYNAMIC_SCHEDULE_FILE, {})
@@ -125,6 +126,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
                                 self._dynamic_triggered.add(key)
                                 self._save_dynamic_schedule_state(self._dynamic_times, self._dynamic_triggered)
                                 logger.info(f"[BiliBot] 📢 触发动态发布（{key}）")
+                                break
                 if self.config.get("ENABLE_REPLY", True): await self._poll_unified()
                 # 番剧主动看番（随机时间调度，与视频/动态一致）
                 if self.config.get("ENABLE_BANGUMI", False) and self.config.get("BANGUMI_PROACTIVE", False):
@@ -543,6 +545,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
                 (PROACTIVE_TRIGGER_LOG_FILE, 100, "主动触发日志"),
                 (WATCH_LOG_FILE, 100, "观影日志"),
                 (DYNAMIC_LOG_FILE, 50, "动态日志"),
+                (REPLY_LOG_FILE, 500, "回复日志"),
             ]:
                 data = self._load_json(log_file, [])
                 if isinstance(data, list) and len(data) > max_entries:
@@ -801,31 +804,45 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         """查看某天的评论回复记录。用法: /bili回复日志 [日期YYYY-MM-DD]"""
         parts = event.message_str.strip().split(maxsplit=1)
         target_date = parts[1].strip() if len(parts) >= 2 else datetime.now().strftime("%Y-%m-%d")
-        memory = self._load_json(MEMORY_FILE, [])
-        chats = [m for m in memory if m.get("memory_type") == "chat" and m.get("time", "").startswith(target_date)]
-        if not chats:
-            yield event.plain_result(f"💬 {target_date} 没有回复记录")
+        # 优先从独立回复日志读取
+        reply_log = self._load_json(REPLY_LOG_FILE, [])
+        today_replies = [r for r in reply_log if r.get("time", "").startswith(target_date)]
+        # 兼容旧数据：也从 memory.json 补充
+        if not today_replies:
+            memory = self._load_json(MEMORY_FILE, [])
+            chats = [m for m in memory if m.get("memory_type") == "chat" and m.get("time", "").startswith(target_date)]
+            if not chats:
+                yield event.plain_result(f"💬 {target_date} 没有回复记录")
+                return
+            lines = [f"💬 {target_date} 回复日志（共 {len(chats)} 条，来自记忆）", "━━━━━━━━━━━━"]
+            for i, c in enumerate(chats, 1):
+                username = c.get("username", "?")
+                t = c.get("time", "?")
+                time_part = t.split(" ", 1)[1] if " " in t else t
+                text = c.get("text", "")
+                user_msg = ""
+                bot_reply = ""
+                if "说：" in text and "| Bot回复：" in text:
+                    after_said = text.split("说：", 1)[1]
+                    parts2 = after_said.split(" | Bot回复：", 1)
+                    user_msg = parts2[0].strip()[:60]
+                    bot_reply = parts2[1].strip()[:60] if len(parts2) > 1 else ""
+                else:
+                    user_msg = text[:80]
+                lines.append(f"{i}. [{time_part}] {username}")
+                lines.append(f"   📨 {user_msg}")
+                if bot_reply:
+                    lines.append(f"   💬 {bot_reply}")
+            yield event.plain_result("\n".join(lines))
             return
-        lines = [f"💬 {target_date} 回复日志（共 {len(chats)} 条）", "━━━━━━━━━━━━"]
-        for i, c in enumerate(chats, 1):
-            username = c.get("username", "?")
-            t = c.get("time", "?")
+        lines = [f"💬 {target_date} 回复日志（共 {len(today_replies)} 条）", "━━━━━━━━━━━━"]
+        for i, r in enumerate(today_replies, 1):
+            t = r.get("time", "?")
             time_part = t.split(" ", 1)[1] if " " in t else t
-            text = c.get("text", "")
-            # 从 text 里提取用户内容和bot回复
-            user_msg = ""
-            bot_reply = ""
-            if "说：" in text and "| Bot回复：" in text:
-                after_said = text.split("说：", 1)[1]
-                parts2 = after_said.split(" | Bot回复：", 1)
-                user_msg = parts2[0].strip()[:60]
-                bot_reply = parts2[1].strip()[:60] if len(parts2) > 1 else ""
-            else:
-                user_msg = text[:80]
-            lines.append(f"{i}. [{time_part}] {username}")
-            lines.append(f"   📨 {user_msg}")
-            if bot_reply:
-                lines.append(f"   💬 {bot_reply}")
+            lines.append(f"{i}. [{time_part}] {r.get('username', '?')}")
+            lines.append(f"   📨 {r.get('content', '?')[:60]}")
+            lines.append(f"   💬 {r.get('reply', '?')[:60]}")
+            lines.append(f"   💛 好感{'+' if r.get('score_delta', 0) >= 0 else ''}{r.get('score_delta', 0)}")
         yield event.plain_result("\n".join(lines))
 
     @filter.command("bili帮助")
