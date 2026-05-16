@@ -253,7 +253,7 @@ comment要求：像B站用户真实评论，可以玩梗吐槽。
             logger.warning("[BiliBot] 当前环境不满足视频媒体分析条件，将回退为纯文本视频分析。")
         is_manual = max_watch is not None
         daily_watch = max_watch if is_manual else self.config.get("PROACTIVE_VIDEO_COUNT", 3)
-        daily_comment = max_comment if max_comment is not None else random.randint(1, 3)
+        daily_comment = max_comment if max_comment is not None else self.config.get("PROACTIVE_COMMENT_COUNT", 2)
         watch_log = self._load_json(WATCH_LOG_FILE, [])
         today_str = datetime.now().strftime("%Y-%m-%d")
         # 日限检查：所有来源（含手动/LLM触发）均计入总量
